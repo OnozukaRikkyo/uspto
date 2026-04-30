@@ -10,10 +10,11 @@ load_dotenv()
 # ==========================================
 # 設定情報の定義
 # ==========================================
-CSV_PATH = "/home/sonozuka/multimodal/data/2022.csv"
-CANDIDATES_LOG_PATH = "processed_log_2022.txt"            # 検索完了ログ（再開用）
-STRICT_JSON_PATH = "layer2_strict_102_103.json"           # 💎 Layer 2: テキストで明確な拒絶が裏付けられた確証ペア
-PTO892_JSON_PATH = "layer1_pto892_candidates.json"        # 🥇 Layer 1: 審査官が引用した強力な類似候補（AI学習の主データ）
+ROOT_DIR = "/mnt/eightthdd/uspto"
+CSV_PATH = f"{ROOT_DIR}/2022.csv"
+CANDIDATES_LOG_PATH = f"{ROOT_DIR}/processed_log_2022.txt"         # 検索完了ログ（再開用）
+STRICT_JSON_PATH = f"{ROOT_DIR}/layer2_strict_102_103.json"        # 💎 Layer 2: テキストで明確な拒絶が裏付けられた確証ペア
+PTO892_JSON_PATH = f"{ROOT_DIR}/layer1_pto892_candidates.json"     # 🥇 Layer 1: 審査官が引用した強力な類似候補（AI学習の主データ）
 MY_API_KEY = os.getenv("MY_API_KEY")
 
 def normalize_patent_id(raw_id):

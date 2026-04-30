@@ -10,8 +10,9 @@ load_dotenv()
 # ==========================================
 # 設定情報の定義
 # ==========================================
-CSV_PATH = "/home/sonozuka/multimodal/data/2022.csv"  # 読み込むCSVファイルのパス
-OUTPUT_JSON_PATH = "examiner_rejections_2022.json"    # 結果を保存するJSONファイルのパス
+ROOT_DIR = "/mnt/eightthdd/uspto"
+CSV_PATH = f"{ROOT_DIR}/2022.csv"                     # 読み込むCSVファイルのパス
+OUTPUT_JSON_PATH = f"{ROOT_DIR}/examiner_rejections_2022.json"  # 結果を保存するJSONファイルのパス
 MY_API_KEY = os.getenv("MY_API_KEY")                  # USPTO ODP APIキー
 
 def normalize_patent_id(raw_id):
