@@ -1,4 +1,5 @@
 import os
+import glob
 import json
 import time
 import requests
@@ -11,8 +12,8 @@ load_dotenv()
 # 設定情報の定義
 # ==========================================
 ROOT_DIR = "/mnt/eightthdd/uspto"
-CSV_PATH = f"{ROOT_DIR}/2022.csv"
-CANDIDATES_LOG_PATH = f"{ROOT_DIR}/processed_log_2022.txt"         # 検索完了ログ（再開用）
+DATA_DIR = f"{ROOT_DIR}/data"
+CANDIDATES_LOG_PATH = f"{ROOT_DIR}/processed_log_all.txt"          # 検索完了ログ（再開用）
 STRICT_JSON_PATH = f"{ROOT_DIR}/layer2_strict_102_103.json"        # 💎 Layer 2: テキストで明確な拒絶が裏付けられた確証ペア
 PTO892_JSON_PATH = f"{ROOT_DIR}/layer1_pto892_candidates.json"     # 🥇 Layer 1: 審査官が引用した強力な類似候補（AI学習の主データ）
 MY_API_KEY = os.getenv("MY_API_KEY")
@@ -132,8 +133,9 @@ def verify_layer2_strict(app_number, target_patent, api_key, max_retries=3):
     return "KEEP_LAYER1", "テキスト取得エラー(リトライ上限)"
 
 def process_hybrid_pipeline():
-    print(f"📂 CSV読込: {CSV_PATH}")
-    df = pd.read_csv(CSV_PATH)
+    csv_files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
+    print(f"📂 CSV読込: {DATA_DIR} ({len(csv_files)}ファイル)")
+    df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
     raw_ids = df['id'].dropna().unique()
     total = len(raw_ids)
 

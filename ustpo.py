@@ -1,4 +1,5 @@
 import os
+import glob
 import json
 import time
 import requests
@@ -11,8 +12,8 @@ load_dotenv()
 # 設定情報の定義
 # ==========================================
 ROOT_DIR = "/mnt/eightthdd/uspto"
-CSV_PATH = f"{ROOT_DIR}/2022.csv"                     # 読み込むCSVファイルのパス
-OUTPUT_JSON_PATH = f"{ROOT_DIR}/examiner_rejections_2022.json"  # 結果を保存するJSONファイルのパス
+DATA_DIR = f"{ROOT_DIR}/data"
+OUTPUT_JSON_PATH = f"{ROOT_DIR}/examiner_rejections_all.json"   # 結果を保存するJSONファイルのパス
 MY_API_KEY = os.getenv("MY_API_KEY")                  # USPTO ODP APIキー
 
 def normalize_patent_id(raw_id):
@@ -92,8 +93,9 @@ def process_csv_batch():
     """
     CSVを読み込み、ループでAPI処理を実行し、結果を保存する
     """
-    print(f"📂 CSVファイルの読み込み中: {CSV_PATH}")
-    df = pd.read_csv(CSV_PATH)
+    csv_files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
+    print(f"📂 CSVファイルの読み込み中: {DATA_DIR} ({len(csv_files)}ファイル)")
+    df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
     
     if 'id' not in df.columns:
         print("エラー: CSVに 'id' カラムが存在しません。")
