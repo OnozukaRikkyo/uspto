@@ -58,6 +58,8 @@ def extract_layer1_candidates(prior_art_number, api_key, known_ids=None):
     for doc in docs:
         if not doc.get("officeActionDate"):
             continue
+        check_and_register_cited(doc, known_ids)
+
         is_examiner = doc.get("examinerCitedReferenceIndicator", False)
         alt_ind = doc.get("applicantCitedExaminerReferenceIndicator", False)
 
@@ -67,7 +69,6 @@ def extract_layer1_candidates(prior_art_number, api_key, known_ids=None):
 
             # CTNF/CTFRだけでなく、NONやFINALが含まれるOAを広く拾う
             if any(x in oa_category for x in ["CTNF", "CTFR", "NON", "FINAL"]):
-                check_and_register_cited(doc, known_ids)
                 candidates.append({
                     "app_number": doc.get("patentApplicationNumber"),
                     "oa_date": doc.get("officeActionDate"),
