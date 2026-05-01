@@ -8,9 +8,12 @@ import pandas as pd
 
 LOG_DIR         = Path("/mnt/eightthdd/uspto/log")
 ADDED_CSV_PATH  = Path("/mnt/eightthdd/uspto/added.csv")
-INDEX_PATH      = Path("/mnt/eightthdd/uspto/numpy_data/patent_ids.npy")
+INDEX_DIR       = Path("/mnt/eightthdd/uspto/numpy_data")
 
-# D543613 → DESIGN_OFFSET + 543613 として int64 に収める
+PATENT_IDS_PATH  = INDEX_DIR / "patent_ids.npy"
+PATENT_META_PATH = INDEX_DIR / "patent_meta.npy"
+FILE_LIST_PATH   = INDEX_DIR / "file_list.txt"
+
 DESIGN_OFFSET = 10_000_000_000
 
 CSV_COLUMNS = ['title', 'id', 'claim', 'date', 'class', 'class_search',
@@ -53,7 +56,7 @@ def check_status(response, context: str, logger: logging.Logger) -> None:
 
 def id_to_int(patent_id: str) -> int | None:
     """
-    正規化済み特許ID を int64 値に変換する。
+    正規化済み特許IDをint64値に変換する。
       'D543613'  → 10_000_543_613
       '12345678' → 12_345_678
     """
@@ -66,7 +69,7 @@ def id_to_int(patent_id: str) -> int | None:
 
 
 def _normalize_id(raw_id: str) -> str | None:
-    """'D0543613' → 'D543613', 数値文字列はそのまま正規化, それ以外 → None"""
+    """'D0543613' → 'D543613', 数値文字列は正規化, それ以外 → None"""
     s = str(raw_id).strip().strip('.,')
     if s.upper().startswith('D') and s[1:].isdigit():
         return 'D' + str(int(s[1:]))
@@ -93,15 +96,25 @@ def parse_cited_id(cited_str: str) -> str | None:
 
 class KnownIds:
     """
-    ソート済み numpy int64 配列 + added.csv 用 Python set による高速 ID 検索。
+    ソート済み numpy int64 配列 + メタデータ配列 + added.csv 用 dict による高速ID検索。
 
-    numpy 配列 (np.searchsorted) : O(log n) — data/配下の全 CSV を格納
-    Python set                   : O(1)      — 実行中に追記した added.csv 分
+    _arr  : shape(N,)   int64  ソート済み特許ID  → np.searchsorted で O(log n)
+    _meta : shape(N,2)  int32  [file_idx, row_idx] （_arr と同順）
+    _added: dict[int, list[int,int]]  {patent_int: [file_idx, row_idx]}
+            added.csv 由来 + 実行中追記分。row_idx は追記時点で確定する。
     """
 
-    def __init__(self, arr: np.ndarray, added: set[int]):
-        self._arr   = arr    # ソート済み int64 配列
-        self._added = added  # added.csv 由来 + 実行中追記分
+    def __init__(
+        self,
+        arr:            np.ndarray,
+        meta:           np.ndarray,
+        added:          dict,
+        added_file_idx: int,
+    ):
+        self._arr           = arr
+        self._meta          = meta
+        self._added         = added          # {int: [file_idx, row_idx]}
+        self._added_file_idx = added_file_idx  # added.csv のファイルインデックス
 
     def __contains__(self, patent_id: str) -> bool:
         n = id_to_int(patent_id)
@@ -115,48 +128,95 @@ class KnownIds:
     def __len__(self) -> int:
         return len(self._arr) + len(self._added)
 
-    def add(self, patent_id: str) -> None:
-        """added.csv に追記したIDを実行内重複防止のため登録する。"""
+    def add(self, patent_id: str, row: int = 0) -> None:
+        """
+        patent_id を _added に登録する。
+        row: added.csv への 0 ベース行インデックス（デフォルト 0）。
+        check_and_register_cited から呼ぶ場合は実際の行番号を渡す。
+        """
         n = id_to_int(patent_id)
         if n is not None:
-            self._added.add(n)
+            self._added[n] = [self._added_file_idx, row]
+
+    def update_row(self, patent_id: str, row: int) -> None:
+        """
+        _added に登録済みエントリの行番号を後から更新する。
+        add() を row=0 で呼んだ後、実際の書き込み行が確定したタイミングで使う。
+        """
+        n = id_to_int(patent_id)
+        if n is not None and n in self._added:
+            self._added[n][1] = row
+
+    def get_location(self, patent_id: str) -> tuple[int, int] | None:
+        """
+        (file_idx, row_idx) を返す。未知の場合は None。
+        file_idx は file_list.txt の行番号、added.csv は added_file_idx。
+        row_idx は各ファイル内の 0 ベースデータ行インデックス。
+        """
+        n = id_to_int(patent_id)
+        if n is None:
+            return None
+        if n in self._added:
+            return (self._added[n][0], self._added[n][1])
+        idx = np.searchsorted(self._arr, n)
+        if int(idx) < len(self._arr) and self._arr[idx] == n:
+            return (int(self._meta[idx, 0]), int(self._meta[idx, 1]))
+        return None
 
 
 def load_known_ids(_data_dir: str = "") -> KnownIds:
     """
-    numpy インデックスファイルから KnownIds を生成して返す。
-    インデックスがなければ build_id_index.py を先に実行するよう案内して終了する。
-    added.csv が存在すれば Python set に読み込む。
+    numpy インデックスファイル群から KnownIds を生成して返す。
+    ファイルが存在しない場合は build_id_index.py を実行するよう案内して終了する。
+    added.csv が存在すれば dict に読み込む。
     """
-    if not INDEX_PATH.exists():
-        sys.exit(
-            f"\n[ERROR] インデックスファイルが見つかりません: {INDEX_PATH}\n"
-            f"先に build_id_index.py を実行してください。\n"
-        )
+    for path in [PATENT_IDS_PATH, PATENT_META_PATH, FILE_LIST_PATH]:
+        if not path.exists():
+            sys.exit(
+                f"\n[ERROR] インデックスファイルが見つかりません: {path}\n"
+                f"先に build_id_index.py を実行してください。\n"
+            )
 
-    arr = np.load(INDEX_PATH)  # ソート済み int64 配列
+    arr  = np.load(PATENT_IDS_PATH)
+    meta = np.load(PATENT_META_PATH)
 
-    added: set[int] = set()
+    with open(FILE_LIST_PATH, encoding='utf-8') as f:
+        file_list = [line.strip() for line in f if line.strip()]
+    added_file_idx = len(file_list)  # added.csv は data/ CSVs の次のインデックス
+
+    added: dict[int, list] = {}
     if ADDED_CSV_PATH.exists():
         try:
             df = pd.read_csv(ADDED_CSV_PATH, usecols=['id'])
-            for raw_id in df['id'].dropna():
-                n = id_to_int(str(_normalize_id(str(raw_id)) or ''))
-                if n is not None:
-                    added.add(n)
+            for row_idx, raw_id in df['id'].dropna().items():
+                nid = _normalize_id(str(raw_id))
+                if nid:
+                    n = id_to_int(nid)
+                    if n is not None:
+                        added[n] = [added_file_idx, int(row_idx)]
         except Exception:
             pass
 
-    return KnownIds(arr, added)
+    return KnownIds(arr, meta, added, added_file_idx)
+
+
+# ── added.csv 行カウント ──────────────────────────────────────────────────────
+
+def _next_added_row() -> int:
+    """added.csv に次に追記される 0 ベースの行インデックスを返す。"""
+    if not ADDED_CSV_PATH.exists():
+        return 0
+    with open(ADDED_CSV_PATH, 'r', encoding='utf-8') as f:
+        n = sum(1 for _ in f)
+    return max(0, n - 1)  # ヘッダー行を除く
 
 
 # ── cited チェック & added.csv 追記 ──────────────────────────────────────────
 
 def check_and_register_cited(doc: dict, known_ids: KnownIds | None) -> None:
     """
-    doc['citedDocumentIdentifier'] が known_ids に存在するか確認する。
-    - 存在する → 何もしない
-    - 存在しない → added.csv に追記し known_ids を更新（実行内重複防止）
+    doc['citedDocumentIdentifier'] をチェックし、未知の特許は added.csv に追記する。
+    追記と同時に実際の行番号を known_ids に登録する。
     埋められない列は print で出力する。
     """
     if known_ids is None:
@@ -169,10 +229,13 @@ def check_and_register_cited(doc: dict, known_ids: KnownIds | None) -> None:
     if patent_id in known_ids:
         return
 
+    row_idx = _next_added_row()
+
     row = {col: '' for col in CSV_COLUMNS}
     row['id'] = patent_id
 
-    print(f"  [added.csv] 新規特許 {patent_id} を追記 | 埋められない列: {', '.join(_UNFILLABLE_COLUMNS)}")
+    print(f"  [added.csv] 新規特許 {patent_id} を追記 (row={row_idx}) | "
+          f"埋められない列: {', '.join(_UNFILLABLE_COLUMNS)}")
 
     new_df = pd.DataFrame([row])[CSV_COLUMNS]
     new_df.to_csv(
@@ -183,4 +246,4 @@ def check_and_register_cited(doc: dict, known_ids: KnownIds | None) -> None:
         encoding='utf-8',
     )
 
-    known_ids.add(patent_id)
+    known_ids.add(patent_id, row=row_idx)
