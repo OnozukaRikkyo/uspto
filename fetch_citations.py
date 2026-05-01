@@ -17,7 +17,7 @@ DATA_DIR = f"{ROOT_DIR}/data"
 JSON_OUTPUT_DIR = Path(f"{ROOT_DIR}/json")
 CANDIDATES_LOG_PATH = f"{ROOT_DIR}/processed_log_all.txt"
 MY_API_KEY = os.getenv("MY_API_KEY")
-logger = setup_logger("uspto_2")
+logger = setup_logger("fetch_citations")
 
 _EXCLUDE_FIELDS = {"createUserIdentifier", "obsoleteDocumentIdentifier",
                    "qualitySummaryText", "createDateTime", "id"}
