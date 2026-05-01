@@ -116,8 +116,9 @@ class KnownIds:
         self._added         = added          # {int: [file_idx, row_idx]}
         self._added_file_idx = added_file_idx  # added.csv のファイルインデックス
 
-    def __contains__(self, patent_id: str) -> bool:
-        n = id_to_int(patent_id)
+    def __contains__(self, patent_id: int | str) -> bool:
+        """int または str を受け取り、整数で直接比較する。"""
+        n = patent_id if isinstance(patent_id, int) else id_to_int(patent_id)
         if n is None:
             return False
         if n in self._added:
@@ -222,11 +223,14 @@ def check_and_register_cited(doc: dict, known_ids: KnownIds | None) -> None:
     if known_ids is None:
         return
 
-    cited_str = doc.get("citedDocumentIdentifier", "")
-    patent_id = parse_cited_id(cited_str)
+    cited_str  = doc.get("citedDocumentIdentifier", "")
+    patent_id  = parse_cited_id(cited_str)   # 例: 'D543613'
     if not patent_id:
         return
-    if patent_id in known_ids:
+    patent_int = id_to_int(patent_id)        # 例: 10_000_543_613
+    if patent_int is None:
+        return
+    if patent_int in known_ids:              # 整数で直接比較
         return
 
     row_idx = _next_added_row()
@@ -234,7 +238,7 @@ def check_and_register_cited(doc: dict, known_ids: KnownIds | None) -> None:
     row = {col: '' for col in CSV_COLUMNS}
     row['id'] = patent_id
 
-    print(f"  [added.csv] 新規特許 {patent_id} を追記 (row={row_idx}) | "
+    print(f"  [added.csv] 新規特許 {patent_id} ({patent_int}) を追記 (row={row_idx}) | "
           f"埋められない列: {', '.join(_UNFILLABLE_COLUMNS)}")
 
     new_df = pd.DataFrame([row])[CSV_COLUMNS]
