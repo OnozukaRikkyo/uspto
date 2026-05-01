@@ -6,6 +6,7 @@ import time
 import requests
 import pandas as pd
 from dotenv import load_dotenv
+from api_utils import setup_logger, check_status
 
 load_dotenv()
 
@@ -16,6 +17,7 @@ ROOT_DIR = "/mnt/eightthdd/uspto"
 DATA_DIR = f"{ROOT_DIR}/data"
 OUTPUT_JSON_PATH = f"{ROOT_DIR}/examiner_rejections_all.json"   # 結果を保存するJSONファイルのパス
 MY_API_KEY = os.getenv("MY_API_KEY")                  # USPTO ODP APIキー
+logger = setup_logger("ustpo")
 
 def normalize_patent_id(raw_id):
     """
@@ -51,8 +53,13 @@ def extract_examiner_rejections(prior_art_number, api_key=None):
     if api_key:
         headers["X-API-KEY"] = api_key
 
-    response = requests.post(url, headers=headers, data=payload)
-    response.raise_for_status()
+    context = f"patent={prior_art_number} url={url}"
+    try:
+        response = requests.post(url, headers=headers, data=payload, timeout=30)
+        check_status(response, context, logger)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"通信エラー: {e} | {context}")
+        return None
 
     docs = response.json().get("response", {}).get("docs", [])
 
