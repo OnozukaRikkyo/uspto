@@ -201,7 +201,7 @@ def load_known_ids(_data_dir: str = "") -> KnownIds:
     return KnownIds(arr, meta, added, added_file_idx)
 
 
-# ── added.csv 行カウント ──────────────────────────────────────────────────────
+# ── added.csv ユーティリティ ──────────────────────────────────────────────────
 
 def _next_added_row() -> int:
     """added.csv に次に追記される 0 ベースの行インデックスを返す。"""
@@ -212,12 +212,33 @@ def _next_added_row() -> int:
     return max(0, n - 1)  # ヘッダー行を除く
 
 
+def _check_added_csv(patent_int: int, known_ids: KnownIds) -> bool:
+    """
+    added.csv をファイルから直接読んで patent_int が存在するか確認する。
+    見つかった場合は in-memory の _added にも同期して True を返す。
+    """
+    if not ADDED_CSV_PATH.exists():
+        return False
+    try:
+        df = pd.read_csv(ADDED_CSV_PATH, usecols=['id'])
+        for row_idx, raw_id in df['id'].dropna().items():
+            nid = _normalize_id(str(raw_id))
+            if nid and id_to_int(nid) == patent_int:
+                known_ids._added[patent_int] = [known_ids._added_file_idx, int(row_idx)]
+                return True
+    except Exception:
+        pass
+    return False
+
+
 # ── cited チェック & added.csv 追記 ──────────────────────────────────────────
 
 def check_and_register_cited(doc: dict, known_ids: KnownIds | None) -> None:
     """
     doc['citedDocumentIdentifier'] をチェックし、未知の特許は added.csv に追記する。
-    追記と同時に実際の行番号を known_ids に登録する。
+    ① numpy インデックス + in-memory _added をチェック
+    ② 見つからなければ added.csv ファイルを直接確認
+    ③ どこにもなければ added.csv に追記し known_ids を更新する
     埋められない列は print で出力する。
     """
     if known_ids is None:
@@ -230,9 +251,16 @@ def check_and_register_cited(doc: dict, known_ids: KnownIds | None) -> None:
     patent_int = id_to_int(patent_id)        # 例: 10_000_543_613
     if patent_int is None:
         return
-    if patent_int in known_ids:              # 整数で直接比較
+
+    # ① numpy インデックス + in-memory _added をチェック
+    if patent_int in known_ids:
         return
 
+    # ② added.csv ファイルを直接確認（起動後に他プロセスが書いた分も検出）
+    if _check_added_csv(patent_int, known_ids):
+        return
+
+    # ③ どこにも存在しない → added.csv に追記
     row_idx = _next_added_row()
 
     row = {col: '' for col in CSV_COLUMNS}
