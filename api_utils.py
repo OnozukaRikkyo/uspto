@@ -244,38 +244,41 @@ def check_and_register_cited(doc: dict, known_ids: KnownIds | None) -> None:
     if known_ids is None:
         return
 
-    cited_str  = doc.get("citedDocumentIdentifier", "")
-    patent_id  = parse_cited_id(cited_str)   # 例: 'D543613'
-    if not patent_id:
-        return
-    patent_int = id_to_int(patent_id)        # 例: 10_000_543_613
-    if patent_int is None:
-        return
+    raw = doc.get("citedDocumentIdentifier", "")
+    cited_list = raw if isinstance(raw, list) else [raw]
 
-    # ① numpy インデックス + in-memory _added をチェック
-    if patent_int in known_ids:
-        return
+    for cited_str in cited_list:
+        patent_id  = parse_cited_id(cited_str)   # 例: 'D543613'
+        if not patent_id:
+            continue
+        patent_int = id_to_int(patent_id)        # 例: 10_000_543_613
+        if patent_int is None:
+            continue
 
-    # ② added.csv ファイルを直接確認（起動後に他プロセスが書いた分も検出）
-    if _check_added_csv(patent_int, known_ids):
-        return
+        # ① numpy インデックス + in-memory _added をチェック
+        if patent_int in known_ids:
+            continue
 
-    # ③ どこにも存在しない → added.csv に追記
-    row_idx = _next_added_row()
+        # ② added.csv ファイルを直接確認（起動後に他プロセスが書いた分も検出）
+        if _check_added_csv(patent_int, known_ids):
+            continue
 
-    row = {col: '' for col in CSV_COLUMNS}
-    row['id'] = patent_id
+        # ③ どこにも存在しない → added.csv に追記
+        row_idx = _next_added_row()
 
-    print(f"  [added.csv] 新規特許 {patent_id} ({patent_int}) を追記 (row={row_idx}) | "
-          f"埋められない列: {', '.join(_UNFILLABLE_COLUMNS)}")
+        row = {col: '' for col in CSV_COLUMNS}
+        row['id'] = patent_id
 
-    new_df = pd.DataFrame([row])[CSV_COLUMNS]
-    new_df.to_csv(
-        ADDED_CSV_PATH,
-        mode='a' if ADDED_CSV_PATH.exists() else 'w',
-        header=not ADDED_CSV_PATH.exists(),
-        index=False,
-        encoding='utf-8',
-    )
+        print(f"  [added.csv] 新規特許 {patent_id} ({patent_int}) を追記 (row={row_idx}) | "
+              f"埋められない列: {', '.join(_UNFILLABLE_COLUMNS)}")
 
-    known_ids.add(patent_id, row=row_idx)
+        new_df = pd.DataFrame([row])[CSV_COLUMNS]
+        new_df.to_csv(
+            ADDED_CSV_PATH,
+            mode='a' if ADDED_CSV_PATH.exists() else 'w',
+            header=not ADDED_CSV_PATH.exists(),
+            index=False,
+            encoding='utf-8',
+        )
+
+        known_ids.add(patent_id, row=row_idx)
