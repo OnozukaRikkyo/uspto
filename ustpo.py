@@ -6,6 +6,8 @@ import time
 import requests
 import pandas as pd
 from dotenv import load_dotenv
+from pathlib import Path
+from tqdm import tqdm
 from api_utils import setup_logger, check_status
 
 load_dotenv()
@@ -63,11 +65,8 @@ def extract_examiner_rejections(prior_art_number, api_key=None):
 
     docs = response.json().get("response", {}).get("docs", [])
 
-    print(f"\nDEBUG: {prior_art_number}")
-    print(f"criteria: {criteria}")
-    print(f"総ヒット件数 = {len(docs)}")
+    logger.debug(f"patent={prior_art_number} criteria={criteria} hits={len(docs)}")
 
-    # 🔥 まずはフィルタなしで確認（重要）
     if len(docs) == 0:
         return []
 
@@ -92,27 +91,14 @@ def extract_examiner_rejections(prior_art_number, api_key=None):
             "cited": doc.get("citedDocumentIdentifier")
         })
 
-    print(f"Examiner引用 = {len(results)}")
+    logger.debug(f"patent={prior_art_number} examiner_citations={len(results)}")
 
     return results
 
 
 def process_csv_batch(skip_existing: bool = True):
-    """
-    CSVを読み込み、ループでAPI処理を実行し、結果を保存する
-    """
     csv_files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
-    print(f"📂 CSVファイルの読み込み中: {DATA_DIR} ({len(csv_files)}ファイル)")
-    df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
-
-    if 'id' not in df.columns:
-        print("エラー: CSVに 'id' カラムが存在しません。")
-        return
-
-    # 重複を排除して処理対象のリストを作成
-    raw_ids = df['id'].dropna().unique()
-    total_count = len(raw_ids)
-    print(f"🎯 処理対象となるユニークな特許件数: {total_count}件")
+    print(f"📂 入力ディレクトリ: {DATA_DIR} ({len(csv_files)}ファイル)")
     print(f"⚙️  モード: {'スキップ (処理済みをスキップ)' if skip_existing else '上書き (全件再処理)'}\n")
 
     # 過去の実行結果（レジューム用）を読み込む
@@ -121,43 +107,42 @@ def process_csv_batch(skip_existing: bool = True):
         try:
             with open(OUTPUT_JSON_PATH, "r", encoding="utf-8") as f:
                 results_dict = json.load(f)
-            print(f"🔄 既存のデータ（{len(results_dict)}件）を読み込みました。")
+            print(f"🔄 既存のデータ（{len(results_dict)}件）を読み込みました。\n")
         except json.JSONDecodeError:
-            print("⚠️ 既存のJSONファイルが壊れています。新規作成します。")
+            print("⚠️ 既存のJSONファイルが壊れています。新規作成します。\n")
 
-    # メインループ
-    for i, raw_id in enumerate(raw_ids, 1):
-        target_patent = normalize_patent_id(raw_id)
-
-        if skip_existing and target_patent in results_dict:
+    for csv_path in csv_files:
+        df = pd.read_csv(csv_path)
+        if 'id' not in df.columns:
+            tqdm.write(f"[SKIP] {csv_path}: 'id' カラムが存在しません。")
             continue
 
-        print(f"[{i}/{total_count}] 検索中: {target_patent} (元ID: {raw_id})")
-        
-        # APIリクエストの実行
-        rejections = extract_examiner_rejections(target_patent, api_key=MY_API_KEY)
-        
-        # サーバー負荷軽減のためのスリープ（1件あたり1秒待つ）
-        time.sleep(1.0)
-        
-        if rejections is not None:
+        raw_ids = df['id'].dropna().unique()
+        csv_name = Path(csv_path).name
+
+        for raw_id in tqdm(raw_ids, desc=csv_name, unit="件"):
+            target_patent = normalize_patent_id(raw_id)
+
+            if skip_existing and target_patent in results_dict:
+                continue
+
+            rejections = extract_examiner_rejections(target_patent, api_key=MY_API_KEY)
+            time.sleep(1.0)
+
+            if rejections is None:
+                tqdm.write(f"  [ERROR] {target_patent}: 通信エラー。次回再試行します。")
+                continue
+
             if len(rejections) > 0:
                 results_dict[target_patent] = {
                     "original_id": raw_id,
                     "rejections_found": len(rejections),
                     "records": rejections
                 }
-                print(f"  👉 発見: {len(rejections)} 件の拒絶引用履歴を抽出しました。")
-            else:
-                print("  👉 発見なし")
-        else:
-            print("  👉 データの取得に失敗しました。")
-            # 失敗した場合は dict に記録せず、次回実行時に再トライさせる
-            continue
-            
-        # 1件処理するごとにJSONファイルに上書き保存（不意の停止対策）
-        with open(OUTPUT_JSON_PATH, "w", encoding="utf-8") as f:
-            json.dump(results_dict, f, ensure_ascii=False, indent=2)
+                tqdm.write(f"  👉 {target_patent}: {len(rejections)} 件の拒絶引用履歴を発見")
+
+            with open(OUTPUT_JSON_PATH, "w", encoding="utf-8") as f:
+                json.dump(results_dict, f, ensure_ascii=False, indent=2)
 
     print("\n✅ 全ての処理が完了しました！")
     print(f"出力ファイル: {os.path.abspath(OUTPUT_JSON_PATH)}")

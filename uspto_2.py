@@ -6,6 +6,8 @@ import time
 import requests
 import pandas as pd
 from dotenv import load_dotenv
+from pathlib import Path
+from tqdm import tqdm
 from api_utils import setup_logger, check_status
 
 load_dotenv()
@@ -129,11 +131,8 @@ def verify_layer2_strict(app_number, target_patent, api_key):
 
 def process_hybrid_pipeline(skip_existing: bool = True):
     csv_files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
-    print(f"📂 CSV読込: {DATA_DIR} ({len(csv_files)}ファイル)")
-    df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
-    raw_ids = df['id'].dropna().unique()
-    total = len(raw_ids)
-    print(f"⚙️  モード: {'スキップ (処理済みをスキップ)' if skip_existing else '上書き (全件再処理)'}")
+    print(f"📂 入力ディレクトリ: {DATA_DIR} ({len(csv_files)}ファイル)")
+    print(f"⚙️  モード: {'スキップ (処理済みをスキップ)' if skip_existing else '上書き (全件再処理)'}\n")
 
     # 💎 Layer 2 (確証ペア) の読み込み
     layer2_results = {}
@@ -157,39 +156,48 @@ def process_hybrid_pipeline(skip_existing: bool = True):
             for line in f:
                 processed_ids.add(line.strip())
 
-    print(f"🎯 対象: {total}件 | 済: {len(processed_ids)}件 | Layer1(主力): {len(layer1_results)}件 | Layer2(確証): {len(layer2_results)}件\n")
+    print(f"🔄 済: {len(processed_ids)}件 | Layer1: {len(layer1_results)}件 | Layer2: {len(layer2_results)}件\n")
 
-    for i, raw_id in enumerate(raw_ids, 1):
-        target_patent = normalize_patent_id(raw_id)
-        
-        if skip_existing and target_patent in processed_ids:
+    for csv_path in csv_files:
+        df = pd.read_csv(csv_path)
+        if 'id' not in df.columns:
+            tqdm.write(f"[SKIP] {csv_path}: 'id' カラムが存在しません。")
             continue
-            
-        print(f"[{i}/{total}] 検索中: {target_patent}")
-        candidates = extract_layer1_candidates(target_patent, api_key=MY_API_KEY)
-        time.sleep(1.0)
-        
-        if candidates is not None:
+
+        raw_ids = df['id'].dropna().unique()
+        csv_name = Path(csv_path).name
+
+        for raw_id in tqdm(raw_ids, desc=csv_name, unit="件"):
+            target_patent = normalize_patent_id(raw_id)
+
+            if skip_existing and target_patent in processed_ids:
+                continue
+
+            candidates = extract_layer1_candidates(target_patent, api_key=MY_API_KEY)
+            time.sleep(1.0)
+
+            if candidates is None:
+                tqdm.write(f"  [ERROR] {target_patent}: 通信エラー。次回再試行します。")
+                continue
+
             layer2_strict = []
-            layer1_pto892 = [] 
-            
+            layer1_pto892 = []
+
             if len(candidates) > 0:
-                print(f"  👉 候補 {len(candidates)}件を発見。第2段階(本文解析)に移行します...")
-                
+                tqdm.write(f"  👉 {target_patent}: 候補 {len(candidates)}件 → 第2段階へ")
+
                 for cand in candidates:
                     app_num = cand["app_number"]
                     status, reason = verify_layer2_strict(app_num, target_patent, api_key=MY_API_KEY)
                     time.sleep(1.0)
-                    
+
                     cand["verification_status"] = reason
                     if status == "STRICT":
-                        print(f"    💎 [Layer 2 格上げ] 出願 {app_num} ({reason})")
+                        tqdm.write(f"    💎 [Layer 2] 出願 {app_num}: {reason}")
                         layer2_strict.append(cand)
                     else:
-                        print(f"    🥇 [Layer 1 保持] 出願 {app_num} ({reason})")
+                        tqdm.write(f"    🥇 [Layer 1] 出願 {app_num}: {reason}")
                         layer1_pto892.append(cand)
-            
-            # ========== 保存処理の分岐 ==========
 
             if len(layer2_strict) > 0:
                 layer2_results[target_patent] = {
@@ -199,8 +207,8 @@ def process_hybrid_pipeline(skip_existing: bool = True):
                 }
                 with open(STRICT_JSON_PATH, "w", encoding="utf-8") as f:
                     json.dump(layer2_results, f, ensure_ascii=False, indent=2)
-                print(f"  🎉 【確証データ】 {len(layer2_strict)}件のLayer 2ペアを保存しました。")
-            
+                tqdm.write(f"  🎉 {target_patent}: Layer 2ペア {len(layer2_strict)}件を保存")
+
             if len(layer1_pto892) > 0:
                 layer1_results[target_patent] = {
                     "original_id": raw_id,
@@ -209,19 +217,11 @@ def process_hybrid_pipeline(skip_existing: bool = True):
                 }
                 with open(PTO892_JSON_PATH, "w", encoding="utf-8") as f:
                     json.dump(layer1_results, f, ensure_ascii=False, indent=2)
-                print(f"  📝 【主力データ】 {len(layer1_pto892)}件のLayer 1候補を保存しました。")
-
-            if len(candidates) == 0:
-                print("  👉 候補なし（JSONには出力しません）")
-
-            # ==================================
+                tqdm.write(f"  📝 {target_patent}: Layer 1候補 {len(layer1_pto892)}件を保存")
 
             processed_ids.add(target_patent)
             with open(CANDIDATES_LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(target_patent + "\n")
-                
-        else:
-            print("  👉 ネットワークエラー。次回再試行します。")
 
     print("\n✅ 全パイプラインが完了しました！")
 
