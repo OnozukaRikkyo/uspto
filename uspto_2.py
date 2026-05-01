@@ -8,7 +8,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from pathlib import Path
 from tqdm import tqdm
-from api_utils import setup_logger, check_status
+from api_utils import setup_logger, check_status, load_known_ids, check_and_register_cited
 
 load_dotenv()
 
@@ -31,7 +31,7 @@ def normalize_patent_id(raw_id):
         return str(int(raw_id))
     return raw_id
 
-def extract_layer1_candidates(prior_art_number, api_key):
+def extract_layer1_candidates(prior_art_number, api_key, known_ids=None):
     """
     【第1段階】Citation APIから「審査官が引用した」候補リストを幅広く抽出する
     """
@@ -67,6 +67,7 @@ def extract_layer1_candidates(prior_art_number, api_key):
 
             # CTNF/CTFRだけでなく、NONやFINALが含まれるOAを広く拾う
             if any(x in oa_category for x in ["CTNF", "CTFR", "NON", "FINAL"]):
+                check_and_register_cited(doc, known_ids)
                 candidates.append({
                     "app_number": doc.get("patentApplicationNumber"),
                     "oa_date": doc.get("officeActionDate"),
@@ -134,6 +135,10 @@ def process_hybrid_pipeline(skip_existing: bool = True):
     print(f"📂 入力ディレクトリ: {DATA_DIR} ({len(csv_files)}ファイル)")
     print(f"⚙️  モード: {'スキップ (処理済みをスキップ)' if skip_existing else '上書き (全件再処理)'}\n")
 
+    print("🔍 既知特許IDセットを構築中...")
+    known_ids = load_known_ids(DATA_DIR)
+    print(f"   → {len(known_ids):,} 件のIDを読み込みました。\n")
+
     # 💎 Layer 2 (確証ペア) の読み込み
     layer2_results = {}
     if os.path.exists(STRICT_JSON_PATH):
@@ -173,7 +178,7 @@ def process_hybrid_pipeline(skip_existing: bool = True):
             if skip_existing and target_patent in processed_ids:
                 continue
 
-            candidates = extract_layer1_candidates(target_patent, api_key=MY_API_KEY)
+            candidates = extract_layer1_candidates(target_patent, api_key=MY_API_KEY, known_ids=known_ids)
             time.sleep(1.0)
 
             if candidates is None:
