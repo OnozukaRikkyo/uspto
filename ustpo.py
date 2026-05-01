@@ -8,7 +8,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from pathlib import Path
 from tqdm import tqdm
-from api_utils import setup_logger, check_status
+from api_utils import setup_logger, check_status, load_known_ids, check_and_register_cited
 
 load_dotenv()
 
@@ -33,7 +33,7 @@ def normalize_patent_id(raw_id):
         return str(int(raw_id))
     return raw_id
 
-def extract_examiner_rejections(prior_art_number, api_key=None):
+def extract_examiner_rejections(prior_art_number, api_key=None, known_ids=None):
     url = "https://developer.uspto.gov/ds-api/enriched_cited_reference_metadata/v2/records"
 
     num = prior_art_number.replace("D", "")
@@ -73,6 +73,8 @@ def extract_examiner_rejections(prior_art_number, api_key=None):
     results = []
 
     for doc in docs:
+        check_and_register_cited(doc, known_ids)
+
         raw_flag = doc.get("applicantCitedExaminerReferenceIndicator", "")
         flag = str(raw_flag).lower()
 
@@ -101,6 +103,10 @@ def process_csv_batch(skip_existing: bool = True):
     print(f"📂 入力ディレクトリ: {DATA_DIR} ({len(csv_files)}ファイル)")
     print(f"⚙️  モード: {'スキップ (処理済みをスキップ)' if skip_existing else '上書き (全件再処理)'}\n")
 
+    print("🔍 既知特許IDセットを構築中...")
+    known_ids = load_known_ids(DATA_DIR)
+    print(f"   → {len(known_ids):,} 件のIDを読み込みました。\n")
+
     # 過去の実行結果（レジューム用）を読み込む
     results_dict = {}
     if os.path.exists(OUTPUT_JSON_PATH):
@@ -126,7 +132,7 @@ def process_csv_batch(skip_existing: bool = True):
             if skip_existing and target_patent in results_dict:
                 continue
 
-            rejections = extract_examiner_rejections(target_patent, api_key=MY_API_KEY)
+            rejections = extract_examiner_rejections(target_patent, api_key=MY_API_KEY, known_ids=known_ids)
             time.sleep(1.0)
 
             if rejections is None:
