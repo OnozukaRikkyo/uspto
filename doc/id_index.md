@@ -84,3 +84,32 @@ APIレスポンス内の `citedDocumentIdentifier` が既知IDセットに存在
 
 `title`, `claim`, `date`, `class`, `class_search`, `inv_country`,
 `no_figs`, `sheets`, `file_names`, `fig_desc`, `caption`
+
+## 複数引用がある場合の動作
+
+APIレスポンスの `docs` は引用レコードの配列であり、1回のAPIコールで複数の `doc` が返される。
+`check_and_register_cited` はループ内で各 `doc` に対して1回ずつ呼ばれる。
+
+```
+docs = [doc1, doc2, doc3, ...]
+         ↓      ↓      ↓
+     各docに対して check_and_register_cited を呼び出す
+```
+
+### 重複処理の防止
+
+同一の `citedDocumentIdentifier` が複数の `doc` に現れても、重複して `added.csv` に追記されることはない。
+
+| doc | citedDocumentIdentifier | known_ids の状態 | 動作 |
+|-----|------------------------|-----------------|------|
+| doc1 | US D543613 S | 未登録 | added.csv に追記 → `_added` に追加 |
+| doc2 | US D543613 S | `_added` に存在 | スキップ |
+| doc3 | US D714742 S | 未登録 | added.csv に追記 → `_added` に追加 |
+
+`check_and_register_cited` の末尾で `known_ids.add(patent_id)` を呼ぶため、
+1件目の処理後すぐに `_added` へ登録され、2件目以降は即スキップされる。
+
+### 複数の異なる引用
+
+同一出願で複数の異なる特許を引用している場合、APIはそれぞれ別の `doc` として返す。
+現在の実装はループで全件処理するため、各引用先について漏れなくチェックされる。
