@@ -1,3 +1,4 @@
+import argparse
 import os
 import glob
 import json
@@ -132,12 +133,13 @@ def verify_layer2_strict(app_number, target_patent, api_key, max_retries=3):
             
     return "KEEP_LAYER1", "テキスト取得エラー(リトライ上限)"
 
-def process_hybrid_pipeline():
+def process_hybrid_pipeline(skip_existing: bool = True):
     csv_files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
     print(f"📂 CSV読込: {DATA_DIR} ({len(csv_files)}ファイル)")
     df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
     raw_ids = df['id'].dropna().unique()
     total = len(raw_ids)
+    print(f"⚙️  モード: {'スキップ (処理済みをスキップ)' if skip_existing else '上書き (全件再処理)'}")
 
     # 💎 Layer 2 (確証ペア) の読み込み
     layer2_results = {}
@@ -166,7 +168,7 @@ def process_hybrid_pipeline():
     for i, raw_id in enumerate(raw_ids, 1):
         target_patent = normalize_patent_id(raw_id)
         
-        if target_patent in processed_ids:
+        if skip_existing and target_patent in processed_ids:
             continue
             
         print(f"[{i}/{total}] 検索中: {target_patent}")
@@ -229,5 +231,17 @@ def process_hybrid_pipeline():
 
     print("\n✅ 全パイプラインが完了しました！")
 
+def main():
+    parser = argparse.ArgumentParser(description="USPTO hybrid pipeline (Layer1 + Layer2)")
+    parser.add_argument(
+        "--no-skip-existing",
+        dest="skip_existing",
+        action="store_false",
+        help="処理済みレコードを上書き再処理する（デフォルト: スキップ）",
+    )
+    parser.set_defaults(skip_existing=True)
+    args = parser.parse_args()
+    process_hybrid_pipeline(skip_existing=args.skip_existing)
+
 if __name__ == "__main__":
-    process_hybrid_pipeline()
+    main()

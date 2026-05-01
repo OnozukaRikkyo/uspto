@@ -1,3 +1,4 @@
+import argparse
 import os
 import glob
 import json
@@ -89,14 +90,14 @@ def extract_examiner_rejections(prior_art_number, api_key=None):
     return results
 
 
-def process_csv_batch():
+def process_csv_batch(skip_existing: bool = True):
     """
     CSVを読み込み、ループでAPI処理を実行し、結果を保存する
     """
     csv_files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
     print(f"📂 CSVファイルの読み込み中: {DATA_DIR} ({len(csv_files)}ファイル)")
     df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
-    
+
     if 'id' not in df.columns:
         print("エラー: CSVに 'id' カラムが存在しません。")
         return
@@ -104,7 +105,8 @@ def process_csv_batch():
     # 重複を排除して処理対象のリストを作成
     raw_ids = df['id'].dropna().unique()
     total_count = len(raw_ids)
-    print(f"🎯 処理対象となるユニークな特許件数: {total_count}件\n")
+    print(f"🎯 処理対象となるユニークな特許件数: {total_count}件")
+    print(f"⚙️  モード: {'スキップ (処理済みをスキップ)' if skip_existing else '上書き (全件再処理)'}\n")
 
     # 過去の実行結果（レジューム用）を読み込む
     results_dict = {}
@@ -112,19 +114,17 @@ def process_csv_batch():
         try:
             with open(OUTPUT_JSON_PATH, "r", encoding="utf-8") as f:
                 results_dict = json.load(f)
-            print(f"🔄 既存のデータ（{len(results_dict)}件）を読み込みました。続きから処理します。")
+            print(f"🔄 既存のデータ（{len(results_dict)}件）を読み込みました。")
         except json.JSONDecodeError:
             print("⚠️ 既存のJSONファイルが壊れています。新規作成します。")
 
     # メインループ
     for i, raw_id in enumerate(raw_ids, 1):
         target_patent = normalize_patent_id(raw_id)
-        
-        # 既に処理済みの場合はスキップ（中断・再開機能）
-        if target_patent in results_dict:
-            # print(f"[{i}/{total_count}] スキップ: {target_patent} (処理済み)")
+
+        if skip_existing and target_patent in results_dict:
             continue
-            
+
         print(f"[{i}/{total_count}] 検索中: {target_patent} (元ID: {raw_id})")
         
         # APIリクエストの実行
@@ -155,6 +155,18 @@ def process_csv_batch():
     print("\n✅ 全ての処理が完了しました！")
     print(f"出力ファイル: {os.path.abspath(OUTPUT_JSON_PATH)}")
 
+def main():
+    parser = argparse.ArgumentParser(description="USPTO examiner rejection extractor")
+    parser.add_argument(
+        "--no-skip-existing",
+        dest="skip_existing",
+        action="store_false",
+        help="処理済みレコードを上書き再処理する（デフォルト: スキップ）",
+    )
+    parser.set_defaults(skip_existing=True)
+    args = parser.parse_args()
+    process_csv_batch(skip_existing=args.skip_existing)
+
 if __name__ == "__main__":
-    process_csv_batch()
+    main()
 
