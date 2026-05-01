@@ -17,6 +17,7 @@ load_dotenv()
 # ==========================================
 ROOT_DIR = "/mnt/eightthdd/uspto"
 DATA_DIR = f"{ROOT_DIR}/data"
+JSON_OUTPUT_DIR = Path(f"{ROOT_DIR}/json")
 CANDIDATES_LOG_PATH = f"{ROOT_DIR}/processed_log_all.txt"          # 検索完了ログ（再開用）
 STRICT_JSON_PATH = f"{ROOT_DIR}/layer2_strict_102_103.json"        # 💎 Layer 2: テキストで明確な拒絶が裏付けられた確証ペア
 PTO892_JSON_PATH = f"{ROOT_DIR}/layer1_pto892_candidates.json"     # 🥇 Layer 1: 審査官が引用した強力な類似候補（AI学習の主データ）
@@ -53,12 +54,15 @@ def extract_layer1_candidates(prior_art_number, api_key, known_ids=None):
         return None
 
     docs = response.json().get("response", {}).get("docs", [])
+    all_docs = []
     candidates = []
 
     for doc in docs:
         if not doc.get("officeActionDate"):
             continue
         check_and_register_cited(doc, known_ids)
+
+        all_docs.append(doc)
 
         is_examiner = doc.get("examinerCitedReferenceIndicator", False)
         alt_ind = doc.get("applicantCitedExaminerReferenceIndicator", False)
@@ -74,7 +78,7 @@ def extract_layer1_candidates(prior_art_number, api_key, known_ids=None):
                     "oa_date": doc.get("officeActionDate"),
                     "oa_category": oa_category
                 })
-    return candidates
+    return candidates, all_docs
 
 def verify_layer2_strict(app_number, target_patent, api_key):
     """
@@ -133,7 +137,9 @@ def verify_layer2_strict(app_number, target_patent, api_key):
 
 def process_hybrid_pipeline(skip_existing: bool = True):
     csv_files = sorted(glob.glob(f"{DATA_DIR}/*.csv"))
+    JSON_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"📂 入力ディレクトリ: {DATA_DIR} ({len(csv_files)}ファイル)")
+    print(f"📁 JSON出力先: {JSON_OUTPUT_DIR}")
     print(f"⚙️  モード: {'スキップ (処理済みをスキップ)' if skip_existing else '上書き (全件再処理)'}\n")
 
     print("🔍 既知特許IDセットを構築中...")
@@ -171,7 +177,17 @@ def process_hybrid_pipeline(skip_existing: bool = True):
             continue
 
         raw_ids = df['id'].dropna().unique()
+        csv_stem = Path(csv_path).stem
         csv_name = Path(csv_path).name
+        json_path = JSON_OUTPUT_DIR / f"{csv_stem}.json"
+
+        csv_results = {}
+        if json_path.exists():
+            try:
+                with open(json_path, encoding="utf-8") as f:
+                    csv_results = json.load(f)
+            except json.JSONDecodeError:
+                pass
 
         for raw_id in tqdm(raw_ids, desc=csv_name, unit="件"):
             target_patent = normalize_patent_id(raw_id)
@@ -179,12 +195,25 @@ def process_hybrid_pipeline(skip_existing: bool = True):
             if skip_existing and target_patent in processed_ids:
                 continue
 
-            candidates = extract_layer1_candidates(target_patent, api_key=MY_API_KEY, known_ids=known_ids)
+            result = extract_layer1_candidates(target_patent, api_key=MY_API_KEY, known_ids=known_ids)
             time.sleep(1.0)
 
-            if candidates is None:
+            if result is None:
                 tqdm.write(f"  [ERROR] {target_patent}: 通信エラー。次回再試行します。")
                 continue
+
+            candidates, all_docs = result
+
+            # per-CSV JSON に全フィールドを保存
+            if all_docs:
+                csv_results[target_patent] = {
+                    "original_id": str(raw_id),
+                    "citations_found": len(all_docs),
+                    "records": all_docs
+                }
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(csv_results, f, ensure_ascii=False, indent=2)
+                tqdm.write(f"  📄 {target_patent}: {len(all_docs)}件のcitationを {json_path.name} に保存")
 
             layer2_strict = []
             layer1_pto892 = []
