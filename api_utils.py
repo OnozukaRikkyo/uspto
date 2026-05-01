@@ -112,6 +112,9 @@ class KnownIds:
         idx = np.searchsorted(self._arr, n)
         return int(idx) < len(self._arr) and self._arr[idx] == n
 
+    def __len__(self) -> int:
+        return len(self._arr) + len(self._added)
+
     def add(self, patent_id: str) -> None:
         """added.csv に追記したIDを実行内重複防止のため登録する。"""
         n = id_to_int(patent_id)
