@@ -19,6 +19,7 @@ CANDIDATES_LOG_PATH = f"{ROOT_DIR}/processed_log_all.txt"
 MY_API_KEY = os.getenv("MY_API_KEY")
 logger = setup_logger("fetch_citations")
 
+# USPTO APIの管理系フィールド（DB登録者・登録日時・内部ID等）を除外し、引用関係・特許内容のみ保持する
 _EXCLUDE_FIELDS = {"createUserIdentifier", "obsoleteDocumentIdentifier",
                    "qualitySummaryText", "createDateTime", "id"}
 
@@ -100,7 +101,7 @@ def process(skip_existing: bool = True):
                 continue
 
             docs = fetch_citations(target_patent, api_key=MY_API_KEY, known_ids=known_ids)
-            time.sleep(1.0)
+            time.sleep(0.5)
 
             if docs is None:
                 tqdm.write(f"  [ERROR] {target_patent}: 通信エラー。次回再試行します。")
