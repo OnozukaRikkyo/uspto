@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import argparse
 import httpx
 from pathlib import Path
 from dotenv import load_dotenv
@@ -15,16 +16,24 @@ if not api_key:
         ".envファイルに MY_API_KEY=あなたのAPIキー を記述してください。"
     )
 
-TARGET_YEAR = 2023
-OUTPUT_DIR = Path(f"/mnt/eightthdd/us_patent/{TARGET_YEAR}")
+parser = argparse.ArgumentParser(description="USPTO 特許文書ダウンローダー")
+parser.add_argument("--year", type=int, default=2023, help="対象年 (デフォルト: 2023)")
+parser.add_argument(
+    "--mode",
+    choices=["skip", "overwrite"],
+    default="skip",
+    help="既存ファイルの扱い: skip=スキップ(デフォルト), overwrite=上書き",
+)
+args = parser.parse_args()
+
+TARGET_YEAR = args.year
+OVERWRITE = args.mode == "overwrite"
+OUTPUT_DIR = Path(f"/mnt/eightthdd/us_patent/patent/{TARGET_YEAR}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = "https://api.uspto.gov"
 HEADERS = {"X-API-KEY": api_key, "Accept": "application/json"}
 PAGE_SIZE = 25
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
 
 MIME_TO_EXT = {
     "application/pdf":   "pdf",
@@ -39,6 +48,17 @@ MIME_TO_EXT = {
     "pdf":               "pdf",
     "xml":               "xml",
 }
+
+# tqdm.write() に転送するハンドラ（プログレスバーを壊さずログ出力）
+class TqdmHandler(logging.Handler):
+    def emit(self, record):
+        tqdm.write(self.format(record))
+
+handler = TqdmHandler()
+handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(handler)
 
 
 def search_applications(client: httpx.Client, year: int):
@@ -57,8 +77,11 @@ def search_applications(client: httpx.Client, year: int):
             data = resp.json()
             if total is None:
                 total = data.get("count", 0)
-                logger.info(f"{year}年の出願件数: {total:,}")
-                app_bar = tqdm(total=total, unit="件", desc="出願", leave=True)
+                logger.info(f"{year}年の出願件数: {total:,}  モード: {args.mode}")
+                app_bar = tqdm(
+                    total=total, unit="件", desc="出願",
+                    position=0, leave=True, dynamic_ncols=True,
+                )
             items = data.get("patentFileWrapperDataBag", [])
             if not items:
                 break
@@ -90,11 +113,9 @@ def download_file(client: httpx.Client, url: str, dest: Path):
             open(dest, "wb") as f,
             tqdm(
                 total=total or None,
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
+                unit="B", unit_scale=True, unit_divisor=1024,
                 desc=dest.name[:40],
-                leave=False,
+                position=1, leave=False, dynamic_ncols=True,
             ) as bar,
         ):
             for chunk in resp.iter_bytes(chunk_size=65536):
@@ -125,20 +146,20 @@ with httpx.Client(headers=HEADERS) as client:
 
                     mime = opt.get("mimeTypeIdentifier", "")
                     ext = MIME_TO_EXT.get(mime.lower(), "bin")
-
                     filename = f"{doc_id}_{code}.{ext}"
                     dest = app_dir / filename
-                    if dest.exists():
+
+                    if dest.exists() and not OVERWRITE:
                         continue
 
                     download_file(client, url, dest)
                     time.sleep(0.3)
 
         except Exception as e:
-            logger.error(f"  エラー: 出願番号 {app_num} - {e}")
+            logger.error(f"エラー: 出願番号 {app_num} - {e}")
 
         app_bar.update(1)
-        app_bar.set_postfix_str(app_num)
+        app_bar.set_postfix_str(app_num, refresh=True)
         time.sleep(0.5)
 
 logger.info("完了")
