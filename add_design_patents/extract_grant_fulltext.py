@@ -6,14 +6,21 @@ missing_patents.parquet に列挙された意匠特許を、BDSS 後継の ODP �
 PTGRDT (Patent Grant Full Text Data with Embedded TIFF Images、週次 tar) から
 取り出し、IMPACT と同一の 12 列年別 CSV・TIF フォルダ・manifest を生成する。
 
-処理の流れ (週次 tar 単位):
-  1. 不足特許の登録日から必要な週次 tar (I{YYYYMMDD}.tar) を特定
-  2. tar をダウンロード (中断時は Range で再開)
-  3. tar をディスクに全展開せず、メンバーを走査して DESIGN/*.ZIP のうち
-     不足特許のみをメモリ上で展開
+処理の流れ (週次アーカイブ単位):
+  0. PTGRDT 製品のファイル一覧 API から、必要な日付範囲の実ファイル名を取得する。
+     週次アーカイブは年代により拡張子が .tar と .ZIP に混在しており (同じ年内でも週によって
+     異なる。2026-07-20 実測: 2007〜2010年台は大半が .ZIP、一部週だけ .tar 等、法則性なし)、
+     ファイル名を "I{YYYYMMDD}.tar" と決め打ちすると存在しない URL になり、ODP がエラー時に
+     返す HTML ページを誤ってアーカイブとしてダウンロードしてしまう (実際に発生した障害)。
+     そのため必ず API 応答の fileDownloadURI / fileName をそのまま使う。
+  1. 不足特許の登録日から必要な週を特定し、上記マッピングでファイル名/URLを引く
+  2. アーカイブをダウンロード (中断時は Range で再開)。ダウンロード後、tar/zip として
+     開けるか検証し (is_tarfile/is_zipfile)、開けなければ破損とみなして削除しスキップする
+  3. アーカイブをディスクに全展開せず、メンバーを走査して DESIGN/*.ZIP のうち
+     不足特許のみをメモリ上で展開 (.tar と .ZIP どちらのコンテナでも同じロジックで処理)
   4. XML を解析して年別 CSV に追記 (IMPACT の process_xml.py と同一の抽出規則。
      caption は生成せず空欄)。TIF+XML は images/{year}/USDxxxxxxx-YYYYMMDD/ に保存
-  5. tar 1 本を処理し終えたら削除 (--keep-tar で保持)
+  5. アーカイブ 1 本を処理し終えたら削除 (--keep-tar で保持)
 
 再開: state/extracted.jsonl にある特許はスキップ。処理済み tar は再取得しない。
 検証: 展開できなかった特許は state/unfound.txt / state/extract_failed.txt とログに記録。
@@ -31,6 +38,7 @@ import argparse
 import csv
 import io
 import json
+import re
 import sys
 import tarfile
 import time
@@ -45,18 +53,105 @@ from tqdm import tqdm
 from common import (API_BASE, ARCHIVE_DIR, ASSIGNEE_PARQUET, BULK_DIR,
                     CSV_COLUMNS, CSV_DIR, IMAGES_DIR, MANIFEST_PARQUET,
                     MISSING_PARQUET, STATE_DIR, api_session, detect_image_type,
-                    download_file, ensure_dirs, load_api_key, setup_logger,
-                    to_api_id)
+                    download_file, ensure_dirs, load_api_key, request_with_retry,
+                    setup_logger, to_api_id)
 
 EXTRACTED_JSONL = STATE_DIR / "extracted.jsonl"     # 1行1特許の処理記録 (manifest の元)
-TARS_DONE_TXT   = STATE_DIR / "tars_done.txt"       # 走査完了した tar 日付
-UNFOUND_TXT     = STATE_DIR / "unfound.txt"         # tar 内に見つからなかった特許
+TARS_DONE_TXT   = STATE_DIR / "tars_done.txt"       # 走査完了した週 (日付) の記録
+UNFOUND_TXT     = STATE_DIR / "unfound.txt"         # アーカイブ内に見つからなかった特許
 FAILED_TXT      = STATE_DIR / "extract_failed.txt"  # XML 解析等に失敗した特許
 
 G_ASSIGNEE_URL = f"{API_BASE}/api/v1/datasets/products/files/PVGPATDIS/g_assignee_disambiguated.tsv.zip"
 G_ASSIGNEE_ZIP = BULK_DIR / "g_assignee_disambiguated.tsv.zip"
 
+# PTGRDT の週次アーカイブ本体のみに一致 (I{YYYYMMDD}.tar / .zip)。
+# -SUPP.ZIP や .dtd 等の補助ファイルは除外する。
+_PTGRDT_NAME_RE = re.compile(r'^I(\d{8})\.(tar|zip)$', re.IGNORECASE)
+
 logger = setup_logger("extract_grant_fulltext")
+
+
+# ── PTGRDT 実ファイル名の解決 ─────────────────────────────────────────────────
+
+def fetch_ptgrdt_index(session, dates: set[str]) -> dict[str, dict]:
+    """
+    PTGRDT 製品のファイル一覧 API から、必要な日付範囲の実ファイル名/URLを取得する。
+    週次アーカイブの拡張子は年代・週によって .tar / .ZIP が混在し法則性がないため、
+    ファイル名を決め打ちせずここで解決した実際の fileName / fileDownloadURI を使う
+    (doc/障害記録_20260720_tar拡張子.md 参照)。
+    戻り値: {date8: {"filename": str, "url": str}}
+    """
+    if not dates:
+        return {}
+    d_min, d_max = min(dates), max(dates)
+    from_date = f"{d_min[:4]}-{d_min[4:6]}-{d_min[6:]}"
+    to_date = f"{d_max[:4]}-{d_max[4:6]}-{d_max[6:]}"
+    url = (f"{API_BASE}/api/v1/datasets/products/PTGRDT"
+          f"?fileDataFromDate={from_date}&fileDataToDate={to_date}&includeFiles=true")
+    r = request_with_retry(session, "GET", url, logger, context="PTGRDT file index")
+    if r is None:
+        sys.exit("PTGRDT ファイル一覧の取得に失敗しました。再実行してください。")
+
+    index: dict[str, dict] = {}
+    for p in r.json().get("bulkDataProductBag", []):
+        for f in p.get("productFileBag", {}).get("fileDataBag", []):
+            name = f.get("fileName", "")
+            m = _PTGRDT_NAME_RE.match(name)
+            if not m:
+                continue
+            index[m.group(1)] = {"filename": name, "url": f.get("fileDownloadURI", "")}
+    return index
+
+
+# ── アーカイブ抽象化 (.tar / .ZIP どちらのトップレベルコンテナも同一ロジックで扱う) ──
+
+class _TarView:
+    def __init__(self, path: Path):
+        self._tar = tarfile.open(path)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._tar.close()
+
+    def iter_names(self):
+        for m in self._tar:
+            if m.isfile():
+                yield m.name
+
+    def read(self, name: str) -> bytes:
+        return self._tar.extractfile(name).read()
+
+
+class _ZipView:
+    def __init__(self, path: Path):
+        self._zip = zipfile.ZipFile(path)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._zip.close()
+
+    def iter_names(self):
+        for info in self._zip.infolist():
+            if not info.is_dir():
+                yield info.filename
+
+    def read(self, name: str) -> bytes:
+        return self._zip.read(name)
+
+
+def is_valid_archive(path: Path) -> bool:
+    """ダウンロードしたファイルが実際に tar/zip として開けるか検証する。"""
+    return tarfile.is_tarfile(path) or zipfile.is_zipfile(path)
+
+
+def _open_archive(path: Path):
+    if tarfile.is_tarfile(path):
+        return _TarView(path)
+    return _ZipView(path)
 
 
 # ── XML 解析 (IMPACT の process_xml.py と同一の抽出規則) ─────────────────────
@@ -157,37 +252,37 @@ def dedup_year_csvs(years: set[str]):
             logger.warning(f"{path.name}: 重複 {n} 行を除去")
 
 
-# ── tar 1 本の処理 ────────────────────────────────────────────────────────────
+# ── アーカイブ 1 本の処理 (.tar / .ZIP どちらでも共通処理) ────────────────────
 
-def process_tar(tar_path: Path, pending: dict[str, str]) -> tuple[set[str], set[str]]:
+def process_archive(archive_path: Path, pending: dict[str, str]) -> tuple[set[str], set[str]]:
     """
-    pending: {patent_id(D+7桁): grant_date(YYYYMMDD)} この tar に入っているはずの未処理特許
+    pending: {patent_id(D+7桁): grant_date(YYYYMMDD)} このアーカイブに入っているはずの未処理特許
     戻り値: (展開成功 id 集合, 解析失敗 id 集合)
     """
     done: set[str] = set()
     failed: set[str] = set()
-    bar = tqdm(total=len(pending), desc=f"{tar_path.name} 展開", unit="件", dynamic_ncols=True)
+    bar = tqdm(total=len(pending), desc=f"{archive_path.name} 展開", unit="件", dynamic_ncols=True)
     scanned = 0
-    with tarfile.open(tar_path) as tar:
-        for member in tar:
+    with _open_archive(archive_path) as archive:
+        for name in archive.iter_names():
             scanned += 1
             if scanned % 500 == 0:
                 bar.set_postfix_str(f"走査 {scanned} メンバー")
-            name_up = member.name.upper()
+            name_up = name.upper()
             if "/DESIGN/" not in name_up or not name_up.endswith(".ZIP"):
                 continue
-            stem = Path(member.name).stem            # USD0939806-20220104
+            stem = Path(name).stem                    # USD0939806-20220104
             if not stem.upper().startswith("USD"):
                 continue
-            pid = stem[2:].split("-")[0].upper()     # D0939806
+            pid = stem[2:].split("-")[0].upper()       # D0939806
             if pid not in pending or pid in done:
                 continue
             try:
-                zbytes = tar.extractfile(member).read()
+                zbytes = archive.read(name)
                 ok = process_patent_zip(pid, stem, zbytes)
             except Exception as e:
-                logger.error(f"{pid}: 展開失敗 ({member.name}): {e}")
-                append_line(FAILED_TXT, f"{pid}\t{tar_path.name}\t{e}")
+                logger.error(f"{pid}: 展開失敗 ({name}): {e}")
+                append_line(FAILED_TXT, f"{pid}\t{archive_path.name}\t{e}")
                 failed.add(pid)
                 bar.update(1)
                 continue
@@ -336,39 +431,64 @@ def main():
         dates = dates[:args.limit_tars]
         print(f"   --limit-tars={args.limit_tars} により今回分: {len(dates)} 本")
 
+    # 実ファイル名/URLを PTGRDT ファイル一覧 API で解決 (拡張子の .tar/.ZIP 混在に対応)
+    print("🔎 PTGRDT の実ファイル名を解決中...")
+    ptgrdt_index = fetch_ptgrdt_index(session, set(dates))
+    n_missing_idx = sum(1 for d8 in dates if d8 not in ptgrdt_index)
+    if n_missing_idx:
+        logger.warning(f"PTGRDT に該当ファイルが見つからない週: {n_missing_idx} 件")
+
     touched_years: set[str] = set()
     total_done = total_failed = total_unfound = 0
 
-    for i, d8 in enumerate(tqdm(dates, desc="週次tar", unit="本", dynamic_ncols=True), 1):
+    for i, d8 in enumerate(tqdm(dates, desc="週次アーカイブ", unit="本", dynamic_ncols=True), 1):
         pending = by_date[d8]
         year = d8[:4]
-        tar_name = f"I{d8}.tar"
-        tar_path = ARCHIVE_DIR / tar_name
-        url = f"{API_BASE}/api/v1/datasets/products/files/PTGRDT/{year}/{tar_name}"
 
-        if not download_file(session, url, tar_path, logger, desc=tar_name):
-            logger.error(f"{tar_name}: ダウンロード失敗。スキップして次の tar へ (再実行で再試行)")
+        info = ptgrdt_index.get(d8)
+        if info is None:
+            logger.error(f"{d8}: PTGRDT に該当する週次ファイルが見つかりません。スキップします。")
+            for pid in sorted(pending):
+                append_line(UNFOUND_TXT, f"{pid}\tNO_ARCHIVE_{d8}")
+            append_line(TARS_DONE_TXT, d8)
+            total_unfound += len(pending)
+            continue
+
+        archive_name = info["filename"]
+        archive_path = ARCHIVE_DIR / archive_name
+        url = info["url"]
+
+        if not download_file(session, url, archive_path, logger, desc=archive_name):
+            logger.error(f"{archive_name}: ダウンロード失敗。スキップして次へ (再実行で再試行)")
+            if args.tar_sleep:
+                time.sleep(args.tar_sleep)
+            continue
+
+        if not is_valid_archive(archive_path):
+            logger.critical(f"{archive_name}: 有効な tar/zip として開けません "
+                            f"(破損またはURL誤りの可能性)。削除してスキップします (再実行で再試行)。")
+            archive_path.unlink(missing_ok=True)
             if args.tar_sleep:
                 time.sleep(args.tar_sleep)
             continue
 
         dedup_year_csvs({year})   # 前回クラッシュ分の重複除去
-        done, failed = process_tar(tar_path, pending)
+        done, failed = process_archive(archive_path, pending)
         not_found = set(pending) - done - failed
         for pid in sorted(not_found):
-            append_line(UNFOUND_TXT, f"{pid}\t{tar_name}")
-            logger.warning(f"{pid}: {tar_name} 内に見つかりませんでした")
+            append_line(UNFOUND_TXT, f"{pid}\t{archive_name}")
+            logger.warning(f"{pid}: {archive_name} 内に見つかりませんでした")
 
         append_line(TARS_DONE_TXT, d8)
         touched_years.add(year)
         total_done += len(done)
         total_failed += len(failed)
         total_unfound += len(not_found)
-        tqdm.write(f"  {tar_name}: 成功 {len(done)} / 失敗 {len(failed)} / 未発見 {len(not_found)}")
-        logger.info(f"{tar_name}: done={len(done)} failed={len(failed)} unfound={len(not_found)}")
+        tqdm.write(f"  {archive_name}: 成功 {len(done)} / 失敗 {len(failed)} / 未発見 {len(not_found)}")
+        logger.info(f"{archive_name}: done={len(done)} failed={len(failed)} unfound={len(not_found)}")
 
         if not args.keep_tar:
-            tar_path.unlink(missing_ok=True)   # 展開済みアーカイブは削除
+            archive_path.unlink(missing_ok=True)   # 展開済みアーカイブは削除
 
         if i % 5 == 0:
             rebuild_manifest()
