@@ -1,0 +1,6 @@
+{
+    "python.defaultInterpreterPath": "/home/sonozuka/.venvs/vllm310/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "python.terminal.useEnvFile": true,
+    "python.envFile": "${workspaceFolder}/.env"
+}
