@@ -391,7 +391,15 @@ def extract_assignees(session, missing_ids_api: set[str]):
 
 def main():
     ap = argparse.ArgumentParser(description="PTGRDT 週次 tar から不足意匠特許を展開")
-    ap.add_argument("--limit-tars", type=int, default=0, help="処理する tar 本数の上限 (0=無制限)")
+    ap.add_argument("--limit-tars", type=int, default=0,
+                    help="処理するアーカイブ本数の上限 (動作確認用。0=無制限で --max-archives-per-run"
+                         " に従う。明示指定した場合はこちらが優先される)")
+    ap.add_argument("--max-archives-per-run", type=int, default=25,
+                    help="1回の実行で処理するアーカイブ本数の既定上限 (安全マージン、既定25本)。"
+                         "ODP バルクダウンロードの週次クォータの正確な数値は非公開のため、"
+                         "1回の実行で全251本規模を連続ダウンロードして未知の上限を超えないよう"
+                         "自動的にここで一時停止し、続きは翌日以降の再実行に委ねる。0で無効化"
+                         "(無制限。週次クォータの制約が判明するまでは非推奨)")
     ap.add_argument("--keep-tar", action="store_true", help="処理済み tar を削除しない")
     ap.add_argument("--skip-assignees", action="store_true", help="譲受人抽出を行わない")
     ap.add_argument("--assignees-only", action="store_true", help="譲受人抽出のみ実行")
@@ -427,9 +435,17 @@ def main():
     print(f"📋 不足特許: {len(missing):,} 件 / 展開済み: {len(extracted):,} / "
           f"未発見: {len(unfound):,} / 残り: {len(todo):,}")
     print(f"📅 対象 tar: {len(dates)} 本 (処理済み {len(tars_done)} 本はスキップ)")
+
+    n_remaining_total = len(dates)
+    auto_paced = False
     if args.limit_tars:
         dates = dates[:args.limit_tars]
         print(f"   --limit-tars={args.limit_tars} により今回分: {len(dates)} 本")
+    elif args.max_archives_per_run and len(dates) > args.max_archives_per_run:
+        dates = dates[:args.max_archives_per_run]
+        auto_paced = True
+        print(f"   ⏸️  安全マージン (--max-archives-per-run={args.max_archives_per_run}) "
+             f"により今回分: {len(dates)} 本 (残り {n_remaining_total - len(dates)} 本は次回以降)")
 
     # 実ファイル名/URLを PTGRDT ファイル一覧 API で解決 (拡張子の .tar/.ZIP 混在に対応)
     print("🔎 PTGRDT の実ファイル名を解決中...")
@@ -499,6 +515,18 @@ def main():
     rebuild_manifest()
     print(f"\n📊 今回実行: 成功 {total_done:,} / 解析失敗 {total_failed:,} / 未発見 {total_unfound:,}")
     print(f"   失敗一覧: {FAILED_TXT}\n   未発見一覧: {UNFOUND_TXT}")
+
+    n_left = n_remaining_total - len(dates)
+    if n_left > 0:
+        print(f"\n⏸️  今回はここまで (残り {n_left:,} 本)。譲受人抽出は全アーカイブ処理完了後にまとめて行うため、"
+             f"今回はスキップします。")
+        if auto_paced:
+            print(f"   ODP バルクダウンロードの週次クォータの安全マージンのため、意図的に一時停止しています。\n"
+                 f"   同じコマンド (python3 extract_grant_fulltext.py) を後で(できれば翌日以降)再実行すると"
+                 f"続きから進みます。")
+            sys.exit(75)   # EX_TEMPFAIL 相当: 一時停止であり致命的エラーではない
+        print(f"   --limit-tars を指定したため打ち切りました。続きは同じコマンドを再実行してください。")
+        return
 
     if not args.skip_assignees:
         extract_assignees(session, missing_ids_api)

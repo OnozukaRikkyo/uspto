@@ -44,12 +44,25 @@ logger = setup_logger("list_missing_patents")
 # ── ① 一括テーブルから意匠特許を抽出 ──────────────────────────────────────────
 
 def load_design_grants_from_bulk() -> pd.DataFrame:
+    """
+    g_patent.tsv.zip から意匠特許を抽出する。
+    withdrawn=1 (後日撤回された特許) は除外する — ODP の Patent Search API・
+    実際の PTGRDT 週次アーカイブのいずれにも存在せず、取得しても必ず「未発見」に
+    なることを実測で確認済み (doc/障害記録_20260720_withdrawn特許.md 参照)。
+    """
     print("📄 g_patent.tsv.zip を読み込み中 (数分かかります)...")
-    df = pd.read_csv(G_PATENT_ZIP, sep="\t", usecols=["patent_id", "patent_type", "patent_date"],
+    df = pd.read_csv(G_PATENT_ZIP, sep="\t",
+                     usecols=["patent_id", "patent_type", "patent_date", "withdrawn"],
                      dtype=str, compression="zip")
     n_total = len(df)
-    df = df[(df["patent_type"] == "design") & (df["patent_date"] >= CUTOFF_DATE)]
-    print(f"   全特許 {n_total:,} 行 → 意匠 & {CUTOFF_DATE} 以降: {len(df):,} 件")
+    is_design = df["patent_type"] == "design"
+    is_recent = df["patent_date"] >= CUTOFF_DATE
+    is_withdrawn = df["withdrawn"] == "1"
+
+    n_withdrawn = (is_design & is_recent & is_withdrawn).sum()
+    df = df[is_design & is_recent & ~is_withdrawn]
+    print(f"   全特許 {n_total:,} 行 → 意匠 & {CUTOFF_DATE} 以降: {len(df) + n_withdrawn:,} 件 "
+         f"(うち withdrawn 除外: {n_withdrawn:,} 件) → 対象: {len(df):,} 件")
     return df[["patent_id", "patent_date"]].rename(columns={"patent_date": "grant_date"})
 
 
