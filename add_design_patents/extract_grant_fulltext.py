@@ -25,14 +25,23 @@ PTGRDT (Patent Grant Full Text Data with Embedded TIFF Images、週次 tar) か�
 再開: state/extracted.jsonl にある特許はスキップ。処理済み tar は再取得しない。
 検証: 展開できなかった特許は state/unfound.txt / state/extract_failed.txt とログに記録。
 
+ペース配分: ODP バルクダウンロードの週次クォータの正確な数値は非公開のため、
+  --sleep-minutes (既定5.0分) でアーカイブ1本処理するごとに固定時間待機する。
+  停止せず全件完了まで連続実行し続ける設計のため、実行には待機時間だけで
+  (アーカイブ本数 × sleep-minutes) 分程度かかる (既定5分・約250本なら待機だけで約20.9時間、
+  +ダウンロード/処理時間で1日強)。nohup 等で長時間動かし続けることを想定。
+  429 (レート制限) 発生時はリトライせず終了するが、サーバーが返す Retry-After ヘッダーの値は
+  print/log するので、実際に発生した際の参考にする (doc/調査記録_APIレート制限.md 参照)。
+
 譲受人: 11 フィールドに含まれないため、PVGPATDIS の g_assignee_disambiguated.tsv.zip
 から不足特許分のみ抽出して assignee_missing.parquet に保存する (--skip-assignees で省略)。
 
 使い方:
   source /home/sonozuka/network_fig/venv/bin/activate
-  python3 extract_grant_fulltext.py                  # 全件
-  python3 extract_grant_fulltext.py --limit-tars 1   # 動作確認 (tar 1本のみ)
-  python3 extract_grant_fulltext.py --assignees-only # 譲受人抽出のみ
+  python3 extract_grant_fulltext.py                     # 全件 (5分/本ペースで連続実行)
+  python3 extract_grant_fulltext.py --limit-tars 1      # 動作確認 (1本のみ、待機なし)
+  python3 extract_grant_fulltext.py --sleep-minutes 10  # ペースを変更 (1本あたり10分)
+  python3 extract_grant_fulltext.py --assignees-only    # 譲受人抽出のみ
 """
 import argparse
 import csv
@@ -392,21 +401,18 @@ def extract_assignees(session, missing_ids_api: set[str]):
 def main():
     ap = argparse.ArgumentParser(description="PTGRDT 週次 tar から不足意匠特許を展開")
     ap.add_argument("--limit-tars", type=int, default=0,
-                    help="処理するアーカイブ本数の上限 (動作確認用。0=無制限で --max-archives-per-run"
-                         " に従う。明示指定した場合はこちらが優先される)")
-    ap.add_argument("--max-archives-per-run", type=int, default=25,
-                    help="1回の実行で処理するアーカイブ本数の既定上限 (安全マージン、既定25本)。"
-                         "ODP バルクダウンロードの週次クォータの正確な数値は非公開のため、"
-                         "1回の実行で全251本規模を連続ダウンロードして未知の上限を超えないよう"
-                         "自動的にここで一時停止し、続きは翌日以降の再実行に委ねる。0で無効化"
-                         "(無制限。週次クォータの制約が判明するまでは非推奨)")
+                    help="処理するアーカイブ本数の上限 (動作確認用)。0=無制限 (--sleep-minutes のペースで"
+                         "全件処理し続ける)")
+    ap.add_argument("--sleep-minutes", type=float, default=5.0,
+                    help="アーカイブ1本処理するごとの固定待機時間 (分、既定5.0分)。ODP バルクダウンロードの"
+                         "週次クォータの正確な数値は非公開のため、サーバー負荷軽減のため固定時間待機する。"
+                         "停止せず連続実行し続け、全件完了まで進む。0を指定すると待機なし (無制限。"
+                         "週次クォータの制約が判明するまでは非推奨)")
     ap.add_argument("--keep-tar", action="store_true", help="処理済み tar を削除しない")
     ap.add_argument("--skip-assignees", action="store_true", help="譲受人抽出を行わない")
     ap.add_argument("--assignees-only", action="store_true", help="譲受人抽出のみ実行")
-    ap.add_argument("--tar-sleep", type=float, default=2.0,
-                    help="週次 tar 1本ごとのダウンロード後の待機秒数 (ODP バルクダウンロードの"
-                         "週次クォータ超過→7日ロックアウトを避けるためのサーバー負荷軽減。既定2.0秒)")
     args = ap.parse_args()
+    pace_seconds = args.sleep_minutes * 60.0
 
     ensure_dirs()
     api_key = load_api_key()
@@ -436,16 +442,14 @@ def main():
           f"未発見: {len(unfound):,} / 残り: {len(todo):,}")
     print(f"📅 対象 tar: {len(dates)} 本 (処理済み {len(tars_done)} 本はスキップ)")
 
-    n_remaining_total = len(dates)
-    auto_paced = False
     if args.limit_tars:
         dates = dates[:args.limit_tars]
         print(f"   --limit-tars={args.limit_tars} により今回分: {len(dates)} 本")
-    elif args.max_archives_per_run and len(dates) > args.max_archives_per_run:
-        dates = dates[:args.max_archives_per_run]
-        auto_paced = True
-        print(f"   ⏸️  安全マージン (--max-archives-per-run={args.max_archives_per_run}) "
-             f"により今回分: {len(dates)} 本 (残り {n_remaining_total - len(dates)} 本は次回以降)")
+    if pace_seconds:
+        est_hours_wait_only = len(dates) * pace_seconds / 3600
+        print(f"   ⏱️  ペース配分: アーカイブ1本ごとに {args.sleep_minutes:g} 分待機 → "
+             f"全 {len(dates)} 本の完了まで待機時間だけで約 {est_hours_wait_only:.1f} 時間 "
+             f"(+ダウンロード/処理時間。停止せず連続実行し続けます)")
 
     # 実ファイル名/URLを PTGRDT ファイル一覧 API で解決 (拡張子の .tar/.ZIP 混在に対応)
     print("🔎 PTGRDT の実ファイル名を解決中...")
@@ -457,17 +461,27 @@ def main():
     touched_years: set[str] = set()
     total_done = total_failed = total_unfound = 0
 
-    for i, d8 in enumerate(tqdm(dates, desc="週次アーカイブ", unit="本", dynamic_ncols=True), 1):
+    n_dates = len(dates)
+
+    def pace_wait(is_last: bool):
+        """アーカイブ1本ごとに固定 pace_seconds だけ待機する (最後の1本は待たない)。"""
+        if not pace_seconds or is_last:
+            return
+        time.sleep(pace_seconds)
+
+    for i, d8 in enumerate(tqdm(dates, desc="アーカイブ", unit="本", dynamic_ncols=True), 1):
+        is_last = (i == n_dates)
         pending = by_date[d8]
         year = d8[:4]
 
         info = ptgrdt_index.get(d8)
         if info is None:
-            logger.error(f"{d8}: PTGRDT に該当する週次ファイルが見つかりません。スキップします。")
+            logger.error(f"{d8}: PTGRDT に該当するファイルが見つかりません。スキップします。")
             for pid in sorted(pending):
                 append_line(UNFOUND_TXT, f"{pid}\tNO_ARCHIVE_{d8}")
             append_line(TARS_DONE_TXT, d8)
             total_unfound += len(pending)
+            pace_wait(is_last)
             continue
 
         archive_name = info["filename"]
@@ -476,16 +490,14 @@ def main():
 
         if not download_file(session, url, archive_path, logger, desc=archive_name):
             logger.error(f"{archive_name}: ダウンロード失敗。スキップして次へ (再実行で再試行)")
-            if args.tar_sleep:
-                time.sleep(args.tar_sleep)
+            pace_wait(is_last)
             continue
 
         if not is_valid_archive(archive_path):
             logger.critical(f"{archive_name}: 有効な tar/zip として開けません "
                             f"(破損またはURL誤りの可能性)。削除してスキップします (再実行で再試行)。")
             archive_path.unlink(missing_ok=True)
-            if args.tar_sleep:
-                time.sleep(args.tar_sleep)
+            pace_wait(is_last)
             continue
 
         dedup_year_csvs({year})   # 前回クラッシュ分の重複除去
@@ -509,24 +521,11 @@ def main():
         if i % 5 == 0:
             rebuild_manifest()
 
-        if args.tar_sleep and i < len(dates):
-            time.sleep(args.tar_sleep)   # ODP バルクダウンロードへの連続アクセスを避ける
+        pace_wait(is_last)
 
     rebuild_manifest()
     print(f"\n📊 今回実行: 成功 {total_done:,} / 解析失敗 {total_failed:,} / 未発見 {total_unfound:,}")
     print(f"   失敗一覧: {FAILED_TXT}\n   未発見一覧: {UNFOUND_TXT}")
-
-    n_left = n_remaining_total - len(dates)
-    if n_left > 0:
-        print(f"\n⏸️  今回はここまで (残り {n_left:,} 本)。譲受人抽出は全アーカイブ処理完了後にまとめて行うため、"
-             f"今回はスキップします。")
-        if auto_paced:
-            print(f"   ODP バルクダウンロードの週次クォータの安全マージンのため、意図的に一時停止しています。\n"
-                 f"   同じコマンド (python3 extract_grant_fulltext.py) を後で(できれば翌日以降)再実行すると"
-                 f"続きから進みます。")
-            sys.exit(75)   # EX_TEMPFAIL 相当: 一時停止であり致命的エラーではない
-        print(f"   --limit-tars を指定したため打ち切りました。続きは同じコマンドを再実行してください。")
-        return
 
     if not args.skip_assignees:
         extract_assignees(session, missing_ids_api)

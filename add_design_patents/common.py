@@ -145,8 +145,19 @@ _FATAL_CODES = {400, 401, 403, 404}
 _RATE_LIMIT_CODE = 429
 
 
-def _exit_rate_limited(status: int, context: str, body: str, logger: logging.Logger):
-    msg = f"HTTP {status} (レート制限/週次クォータ超過) | {context} | {body[:300]}"
+def _exit_rate_limited(response: requests.Response, context: str, logger: logging.Logger):
+    """
+    429 応答時にリトライは行わず即終了する。ただしサーバーが返す Retry-After ヘッダーは
+    (存在すれば) print/log するだけしておく — 実際の待機には使わない。
+    ODP の Retry-After は通常の一時的レート制限では短時間 (数十秒程度) のことが多いようだが、
+    バルクダウンロードの週次クォータ超過時にどう振る舞うかは未確認のため、値を見て
+    今後の対応を判断する材料として記録する (doc/調査記録_APIレート制限.md 参照)。
+    """
+    retry_after = response.headers.get("Retry-After")
+    print(f"\n⚠️  HTTP 429 (レート制限)。Retry-After ヘッダー: {retry_after!r} "
+         f"(リトライはせず終了します)")
+    msg = (f"HTTP {response.status_code} (レート制限/週次クォータ超過) | {context} | "
+          f"Retry-After={retry_after!r} | {response.text[:300]}")
     logger.critical(msg)
     sys.exit(
         f"\nAPI レート制限 (週次クォータ) を超えました。リトライせず終了します。\n{msg}\n"
@@ -171,7 +182,7 @@ def request_with_retry(session: requests.Session, method: str, url: str,
     if r.status_code == 200:
         return r
     if r.status_code == _RATE_LIMIT_CODE:
-        _exit_rate_limited(r.status_code, context, r.text, logger)
+        _exit_rate_limited(r, context, logger)
     if r.status_code in _FATAL_CODES:
         msg = f"HTTP {r.status_code} | {context} | {r.text[:300]}"
         logger.critical(msg)
@@ -212,7 +223,7 @@ def download_file(session: requests.Session, url: str, dest: Path,
         return True
     elif r.status_code not in (200, 206):
         if r.status_code == _RATE_LIMIT_CODE:
-            _exit_rate_limited(r.status_code, context, r.text, logger)
+            _exit_rate_limited(r, context, logger)
         if r.status_code in _FATAL_CODES:
             logger.error(f"HTTP {r.status_code} | {context}")
             return False
