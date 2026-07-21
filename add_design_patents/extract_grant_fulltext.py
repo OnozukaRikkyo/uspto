@@ -26,10 +26,10 @@ PTGRDT (Patent Grant Full Text Data with Embedded TIFF Images、週次 tar) か�
 検証: 展開できなかった特許は state/unfound.txt / state/extract_failed.txt とログに記録。
 
 ペース配分: ODP バルクダウンロードの週次クォータの正確な数値は非公開のため、
-  --sleep-minutes (既定5.0分) でアーカイブ1本処理するごとに固定時間待機する。
+  --sleep-minutes (既定2.0分) でアーカイブ1本処理するごとに固定時間待機する。
   停止せず全件完了まで連続実行し続ける設計のため、実行には待機時間だけで
-  (アーカイブ本数 × sleep-minutes) 分程度かかる (既定5分・約250本なら待機だけで約20.9時間、
-  +ダウンロード/処理時間で1日強)。nohup 等で長時間動かし続けることを想定。
+  (アーカイブ本数 × sleep-minutes) 分程度かかる (既定2分・約250本なら待機だけで約8.4時間、
+  +ダウンロード/処理時間で半日程度)。nohup 等で長時間動かし続けることを想定。
   429 (レート制限) 発生時はリトライせず終了するが、サーバーが返す Retry-After ヘッダーの値は
   print/log するので、実際に発生した際の参考にする (doc/調査記録_APIレート制限.md 参照)。
 
@@ -38,7 +38,7 @@ PTGRDT (Patent Grant Full Text Data with Embedded TIFF Images、週次 tar) か�
 
 使い方:
   source /home/sonozuka/network_fig/venv/bin/activate
-  python3 extract_grant_fulltext.py                     # 全件 (5分/本ペースで連続実行)
+  python3 extract_grant_fulltext.py                     # 全件 (2分/本ペースで連続実行)
   python3 extract_grant_fulltext.py --limit-tars 1      # 動作確認 (1本のみ、待機なし)
   python3 extract_grant_fulltext.py --sleep-minutes 10  # ペースを変更 (1本あたり10分)
   python3 extract_grant_fulltext.py --assignees-only    # 譲受人抽出のみ
@@ -403,8 +403,8 @@ def main():
     ap.add_argument("--limit-tars", type=int, default=0,
                     help="処理するアーカイブ本数の上限 (動作確認用)。0=無制限 (--sleep-minutes のペースで"
                          "全件処理し続ける)")
-    ap.add_argument("--sleep-minutes", type=float, default=5.0,
-                    help="アーカイブ1本処理するごとの固定待機時間 (分、既定5.0分)。ODP バルクダウンロードの"
+    ap.add_argument("--sleep-minutes", type=float, default=2.0,
+                    help="アーカイブ1本処理するごとの固定待機時間 (分、既定2.0分)。ODP バルクダウンロードの"
                          "週次クォータの正確な数値は非公開のため、サーバー負荷軽減のため固定時間待機する。"
                          "停止せず連続実行し続け、全件完了まで進む。0を指定すると待機なし (無制限。"
                          "週次クォータの制約が判明するまでは非推奨)")
