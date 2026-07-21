@@ -461,16 +461,22 @@ def main():
     touched_years: set[str] = set()
     total_done = total_failed = total_unfound = 0
 
-    n_dates = len(dates)
-
-    def pace_wait(is_last: bool):
-        """アーカイブ1本ごとに固定 pace_seconds だけ待機する (最後の1本は待たない)。"""
+    def pace_wait(is_last: bool, multiplier: float = 1.0):
+        """
+        アーカイブ1本ごとに pace_seconds × multiplier だけ待機する (最後の1本は待たない)。
+        multiplier はリトライラウンドが進むごとに指数的に大きくする (指数バックオフ)。
+        """
         if not pace_seconds or is_last:
             return
-        time.sleep(pace_seconds)
+        time.sleep(pace_seconds * multiplier)
 
-    for i, d8 in enumerate(tqdm(dates, desc="アーカイブ", unit="本", dynamic_ncols=True), 1):
-        is_last = (i == n_dates)
+    def process_one_date(d8: str) -> bool:
+        """
+        1週(date8)を処理する。戻り値は成功したか (ダウンロード失敗/破損アーカイブなら False。
+        呼び出し側でリトライ対象に積む)。該当アーカイブなし (PTGRDT に無い) は待っても無駄なので
+        True 扱いで tars_done に記録し、リトライ対象にはしない。
+        """
+        nonlocal total_done, total_failed, total_unfound
         pending = by_date[d8]
         year = d8[:4]
 
@@ -481,24 +487,21 @@ def main():
                 append_line(UNFOUND_TXT, f"{pid}\tNO_ARCHIVE_{d8}")
             append_line(TARS_DONE_TXT, d8)
             total_unfound += len(pending)
-            pace_wait(is_last)
-            continue
+            return True
 
         archive_name = info["filename"]
         archive_path = ARCHIVE_DIR / archive_name
         url = info["url"]
 
         if not download_file(session, url, archive_path, logger, desc=archive_name):
-            logger.error(f"{archive_name}: ダウンロード失敗。スキップして次へ (再実行で再試行)")
-            pace_wait(is_last)
-            continue
+            logger.error(f"{archive_name}: ダウンロード失敗 (今回の実行内で自動リトライします)")
+            return False
 
         if not is_valid_archive(archive_path):
             logger.critical(f"{archive_name}: 有効な tar/zip として開けません "
-                            f"(破損またはURL誤りの可能性)。削除してスキップします (再実行で再試行)。")
+                            f"(破損またはURL誤りの可能性)。削除します (今回の実行内で自動リトライします)。")
             archive_path.unlink(missing_ok=True)
-            pace_wait(is_last)
-            continue
+            return False
 
         dedup_year_csvs({year})   # 前回クラッシュ分の重複除去
         done, failed = process_archive(archive_path, pending)
@@ -518,14 +521,48 @@ def main():
         if not args.keep_tar:
             archive_path.unlink(missing_ok=True)   # 展開済みアーカイブは削除
 
+        return True
+
+    failed_dates: list[str] = []
+    n_dates = len(dates)
+    for i, d8 in enumerate(tqdm(dates, desc="アーカイブ", unit="本", dynamic_ncols=True), 1):
+        if not process_one_date(d8):
+            failed_dates.append(d8)
         if i % 5 == 0:
             rebuild_manifest()
+        pace_wait(is_last=(i == n_dates and not failed_dates))
 
-        pace_wait(is_last)
+    # ダウンロード失敗・破損で保留した週を今回の実行内で自動リトライする
+    # (.part ファイルは残っているため Range で続きから再開される)
+    MAX_RETRY_ROUNDS = 5
+    retry_round = 1
+    while failed_dates and retry_round <= MAX_RETRY_ROUNDS:
+        backoff = 2 ** (retry_round - 1)   # 1, 2, 4, 8, 16 倍 (指数バックオフ)
+        print(f"\n🔁 ダウンロード失敗などで保留していた {len(failed_dates)} 本を再試行します "
+             f"(第{retry_round}/{MAX_RETRY_ROUNDS}回、待機時間 {backoff}倍 ="
+             f" {args.sleep_minutes * backoff:g}分/本)...")
+        retry_list, failed_dates = failed_dates, []
+        n_retry = len(retry_list)
+        for i, d8 in enumerate(tqdm(retry_list, desc=f"再試行{retry_round}", unit="本",
+                                    dynamic_ncols=True), 1):
+            if not process_one_date(d8):
+                failed_dates.append(d8)
+            if i % 5 == 0:
+                rebuild_manifest()
+            pace_wait(is_last=(i == n_retry and not failed_dates), multiplier=backoff)
+        # 全滅していても指数バックオフの意味 (待つほど回復しやすい) があるため打ち切らず、
+        # MAX_RETRY_ROUNDS に達するまでは待機時間を伸ばしながら継続する。
+        retry_round += 1
+    if failed_dates and retry_round > MAX_RETRY_ROUNDS:
+        logger.error(f"再試行回数の上限 ({MAX_RETRY_ROUNDS}回) に達しました。"
+                    f"残り {len(failed_dates)} 本は次回スクリプト再実行時に再試行します: {failed_dates}")
 
     rebuild_manifest()
     print(f"\n📊 今回実行: 成功 {total_done:,} / 解析失敗 {total_failed:,} / 未発見 {total_unfound:,}")
     print(f"   失敗一覧: {FAILED_TXT}\n   未発見一覧: {UNFOUND_TXT}")
+    if failed_dates:
+        print(f"   ⚠️  最終的にダウンロードできなかった週: {len(failed_dates)} 本 "
+             f"({', '.join(failed_dates)}) — 次回スクリプト再実行時に再試行されます。")
 
     if not args.skip_assignees:
         extract_assignees(session, missing_ids_api)
