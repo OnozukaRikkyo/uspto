@@ -23,14 +23,14 @@ missing_patents.parquet の各意匠特許について、審査中に審査官�
 検証: office action 識別子 (officeActionDate / officeActionCategory) の欠損率をログに記録。
 再開: state/appnum_cache.json と state/citations_processed.txt により途中から再実行可能。
 
-ペース配分: --sleep (既定120秒=2分) でバッチ (50件) ごとに固定時間待機する。2026-07-22、
+ペース配分: --sleep (既定60秒=1分) でバッチ (50件) ごとに固定時間待機する。2026-07-22、
   Phase A 実行中に実際に HTTP 429 (Too Many Requests) が発生し即終了したことを受けて、
   既定値を0.5秒から引き上げた (common.py の方針により 429 はリトライせず即終了するため、
-  そもそも429を起こさないようペースを抑える必要がある)。
+  そもそも429を起こさないようペースを抑える必要がある。120秒→60秒に調整済み)。
 
 使い方:
   source /home/sonozuka/network_fig/venv/bin/activate
-  python3 fetch_citations.py               # 全件 (2分/バッチペースで実行)
+  python3 fetch_citations.py               # 全件 (1分/バッチペースで実行)
   python3 fetch_citations.py --limit 100   # 動作確認 (100特許のみ)
   python3 fetch_citations.py --sleep 5     # ペースを変更 (1バッチあたり5秒)
 """
@@ -182,11 +182,11 @@ def build_parquet():
 
 def main():
     ap = argparse.ArgumentParser(description="不足意匠特許の審査官引用を取得")
-    ap.add_argument("--sleep", type=float, default=120.0,
-                    help="バッチ (50件) 間の待機秒数 (既定120秒=2分)。ODP Patent Search API /"
+    ap.add_argument("--sleep", type=float, default=60.0,
+                    help="バッチ (50件) 間の待機秒数 (既定60秒=1分)。ODP Patent Search API /"
                          " Enriched Citation API の週次クォータの正確な数値は非公開のため、"
                          "2026-07-22 に実際に429 (Too Many Requests) が発生したことを受けて"
-                         "既定値を0.5秒から引き上げた")
+                         "既定値を0.5秒から引き上げ、その後1分に調整")
     ap.add_argument("--limit", type=int, default=0, help="処理する特許数の上限 (0=無制限)")
     ap.add_argument("--rebuild-only", action="store_true",
                     help="API を叩かず jsonl から parquet を再構築するのみ")
