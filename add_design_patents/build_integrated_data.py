@@ -92,21 +92,41 @@ def merge_csvs() -> tuple[dict, list]:
         out_path = OUT_DATA_DIR / f"{year}.csv"
 
         if master_path.exists() and not diff_path.exists():
-            # 差分なし → バイト同一コピー
+            mdf = read_csv_raw(master_path)
+            if not mdf["id"].duplicated().any():
+                # 差分なし・マスタ内重複なし → バイト同一コピー
+                tmp = out_path.with_suffix(".csv.tmp")
+                shutil.copy2(master_path, tmp)
+                os.replace(tmp, out_path)
+                results[year] = {"master": len(mdf), "diff": 0, "dropped_dup": 0,
+                                 "master_dup_removed": 0, "out": len(mdf), "mode": "copy"}
+                continue
+            # マスタ内に元々id重複(例: 2019 D0859373) → 先頭行を残して除外し書き直す
+            dup_ids = sorted(set(mdf.loc[mdf["id"].duplicated(), "id"]))
+            errors.append(f"{year}: 元マスタ内 id 重複 → 先頭行のみ保持: {dup_ids}")
+            n_master = len(mdf)
+            deduped = mdf.drop_duplicates(subset="id", keep="first")  # 元の行順を維持
             tmp = out_path.with_suffix(".csv.tmp")
-            shutil.copy2(master_path, tmp)
+            deduped.to_csv(tmp, index=False)
             os.replace(tmp, out_path)
-            n = sum(1 for _ in open(master_path, encoding="utf-8")) - 1
-            results[year] = {"master": n, "diff": 0, "dropped_dup": 0, "out": n, "mode": "copy"}
+            results[year] = {"master": n_master, "diff": 0, "dropped_dup": 0,
+                             "master_dup_removed": n_master - len(deduped),
+                             "out": len(deduped), "mode": "dedup"}
             continue
 
         frames = []
         n_master = n_diff = 0
+        master_dup_removed = 0
         if master_path.exists():
             mdf = read_csv_raw(master_path)
             if list(mdf.columns) != EXPECTED_COLS:
                 sys.exit(f"ERROR: {master_path} の列構成が想定と不一致: {list(mdf.columns)}")
             n_master = len(mdf)
+            if mdf["id"].duplicated().any():
+                dup_ids = sorted(set(mdf.loc[mdf["id"].duplicated(), "id"]))
+                errors.append(f"{year}: 元マスタ内 id 重複 → 先頭行のみ保持: {dup_ids}")
+                mdf = mdf.drop_duplicates(subset="id", keep="first")
+                master_dup_removed = n_master - len(mdf)
             frames.append(mdf)
         ddf = read_csv_raw(diff_path)
         if list(ddf.columns) != EXPECTED_COLS:
@@ -134,6 +154,7 @@ def merge_csvs() -> tuple[dict, list]:
         merged.to_csv(tmp, index=False)
         os.replace(tmp, out_path)
         results[year] = {"master": n_master, "diff": n_diff, "dropped_dup": dropped,
+                         "master_dup_removed": master_dup_removed,
                          "out": len(merged), "mode": "merge"}
     return results, errors
 
@@ -241,24 +262,36 @@ def verify() -> list:
             continue
         odf = read_csv_raw(out_path)
 
-        n_master = n_diff = 0
+        n_master_unique = n_diff = 0
+        master_dup_ids: set = set()
+        mids = None
         if year in master_years:
-            n_master = len(read_csv_raw(MASTER_DIR / f"{year}.csv"))
+            mids = read_csv_raw(MASTER_DIR / f"{year}.csv")["id"]
+            n_master_unique = mids.nunique()
+            master_dup_ids = set(mids[mids.duplicated()])
         if year in diff_years:
             ddf = read_csv_raw(DIFF_CSV_DIR / f"{year}.csv")
             n_diff = len(ddf)
             diff_row_total += n_diff
             # 9: manifest−CSV 突合は後段でまとめて実施するため id→file_names を保持
-        expected = n_master + n_diff
-        check(f"CSV {year} 行数", len(odf) >= n_master and len(odf) <= expected,
-              f"out={len(odf)} master={n_master} diff={n_diff}")
-        dup = odf["id"].duplicated().sum()
-        check(f"CSV {year} id 重複なし", dup == 0, f"{dup} 件重複")
+        expected = n_master_unique + n_diff
+        check(f"CSV {year} 行数", n_master_unique <= len(odf) <= expected,
+              f"out={len(odf)} master_unique={n_master_unique} diff={n_diff}")
+        out_dup = int(odf["id"].duplicated().sum())
+        check(f"CSV {year} id 重複なし", out_dup == 0, f"{out_dup} 件重複")
+        if master_dup_ids:
+            lines.append(f"- CSV {year} 元マスタ内 id 重複を除外済み(先頭行のみ保持): "
+                         f"{sorted(master_dup_ids)}")
         bad_id = (~odf["id"].str.match(ID_RE)).sum()
         check(f"CSV {year} id 形式", bad_id == 0, f"{bad_id} 件不正")
         if year in master_years and year not in diff_years:
-            check(f"CSV {year} コピー同一性(MD5)",
-                  md5(out_path) == md5(MASTER_DIR / f"{year}.csv"))
+            if not master_dup_ids:
+                check(f"CSV {year} コピー同一性(MD5)",
+                      md5(out_path) == md5(MASTER_DIR / f"{year}.csv"))
+            else:
+                # dedup 年はバイト同一にならないため id 集合の一致で検証
+                check(f"CSV {year} dedup後の id 集合一致(元マスタ全idを保持)",
+                      set(odf["id"]) == set(mids))
         all_out_ids.update(odf["id"])
 
     # withdrawn 等で取得不能と確定した特許(state/unfound.txt)は欠落を許容
@@ -369,11 +402,14 @@ def write_report(csv_results: dict, csv_errors: list, img_stats: dict,
         t_diff = sum(r["diff"] for r in csv_results.values())
         t_out = sum(r["out"] for r in csv_results.values())
         t_drop = sum(r["dropped_dup"] for r in csv_results.values())
+        t_mdup = sum(r.get("master_dup_removed", 0) for r in csv_results.values())
         for y in sorted(csv_results):
             r = csv_results[y]
             f.write(f"  {y}: master={r['master']:>7} diff={r['diff']:>6} "
-                    f"dup除外={r['dropped_dup']} out={r['out']:>7} ({r['mode']})\n")
-        f.write(f"  合計: master={t_master} diff={t_diff} dup除外={t_drop} out={t_out}\n")
+                    f"dup除外={r['dropped_dup']} マスタ内重複除外={r.get('master_dup_removed', 0)} "
+                    f"out={r['out']:>7} ({r['mode']})\n")
+        f.write(f"  合計: master={t_master} diff={t_diff} dup除外={t_drop} "
+                f"マスタ内重複除外={t_mdup} out={t_out}\n")
         if csv_errors:
             f.write("  警告:\n")
             for e in csv_errors:
