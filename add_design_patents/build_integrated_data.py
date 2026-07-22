@@ -53,8 +53,16 @@ HARDLINK_SAMPLE = 1000
 
 
 def read_csv_raw(path: Path) -> pd.DataFrame:
-    """セル文字列を一切変換せずに読む(型劣化防止)"""
-    return pd.read_csv(path, dtype=str, keep_default_na=False)
+    """セル文字列を一切変換せずに読む(型劣化防止)。
+
+    マスタ2020.csvのみ先頭にpandasインデックス列(Unnamed: 0)が残っているため、
+    先頭の無名列は除去して12列に正規化する。
+    """
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    first = df.columns[0]
+    if first == "" or first.startswith("Unnamed:"):
+        df = df.drop(columns=[first])
+    return df
 
 
 def preflight() -> None:
@@ -138,7 +146,11 @@ def link_images() -> tuple[pd.DataFrame, dict, list]:
     errors = []
     new_paths = []
 
-    for row in tqdm(manifest.itertuples(index=False), total=len(manifest), desc="TIFリンク"):
+    for i, row in enumerate(tqdm(manifest.itertuples(index=False), total=len(manifest),
+                                 desc="TIFリンク")):
+        if i and i % 10000 == 0:
+            tqdm.write(f"TIFリンク進捗: {i}/{len(manifest)} "
+                       f"(linked={stats['linked']} skipped={stats['skipped']})")
         src = Path(row.folder_path)
         year = str(row.grant_date)[:4]
         dst = OUT_IMAGES_DIR / year / src.name
@@ -271,7 +283,10 @@ def verify() -> list:
         bad_rep = 0
         src_manifest = pd.read_parquet(IMAGE_MANIFEST_PATH)
         src_by_id = dict(zip(src_manifest["patent_id"], src_manifest["folder_path"]))
-        for row in tqdm(man.itertuples(index=False), total=len(man), desc="検証:画像"):
+        for i, row in enumerate(tqdm(man.itertuples(index=False), total=len(man),
+                                     desc="検証:画像")):
+            if i and i % 10000 == 0:
+                tqdm.write(f"検証:画像 進捗: {i}/{len(man)}")
             dst = Path(row.folder_path)
             if not dst.is_dir():
                 bad_folder += 1
